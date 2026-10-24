@@ -9,7 +9,7 @@
     "dev:server": "tsx watch src/server.ts",
     "server": "tsx src/server.ts",
     "start": "node dist/server.js",
-    "build": "tsc",
+    "build": "tsc && vite build",
     "build:web": "vite build",
     "test": "node dist/test.js && node dist/test_day4.js && node dist/test_pooling.js && node dist/test_consent.js && node dist/test_consent_expiry.js && node dist/test_notifications.js && node dist/test_day7.js && node dist/test_verification.js && node dist/test_nlpParser.js && node dist/test_vehicleMatch.js && node dist/test_ride_hailing.js && node dist/test_vehicleDeclaration.js && node dist/test_mockCandidates.js",
     "test:mock-candidates": "tsx src/test_mockCandidates.ts",

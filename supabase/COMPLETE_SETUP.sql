@@ -1,6 +1,7 @@
 -- ========================================================
--- ROUTEMATE COMPLETE SUPABASE DATABASE SETUP
+-- ROUTESYNC COMPLETE DATABASE SETUP
 -- Paste and run this entire file in Supabase SQL Editor
+-- Includes all 22 migrations + seed data in verified order
 -- ========================================================
 
 
@@ -447,7 +448,7 @@ as $$
       coarse_candidates.candidate_destination_lng
     ) as route_overlap_pct
   ) as route
-  where route.route_overlap_pct >= 50
+  where route.route_overlap_pct >= 75
   order by route.route_overlap_pct desc, coarse_candidates.candidate_departure_at
   limit greatest(1, least(coalesce(p_limit, 50), 100));
 $$;
@@ -1490,6 +1491,19 @@ create index if not exists users_verified_idx
 comment on column public.users.is_verified is
   'True once the verify-student flow confirmed a Supabase Auth email whose domain is on the university allowlist (src/verification.ts).';
 
+-- Tighten users_update_by_auth_user policy now that is_verified and verified_domain columns exist:
+drop policy if exists users_update_by_auth_user on public.users;
+create policy users_update_by_auth_user
+on public.users
+for update
+to authenticated
+using (auth.uid() = auth_user_id)
+with check (
+  auth.uid() = auth_user_id
+  and is_verified is not distinct from (select u.is_verified from public.users u where u.id = users.id)
+  and verified_domain is not distinct from (select u.verified_domain from public.users u where u.id = users.id)
+);
+
 
 -- ========================================================
 -- Migration: 20260901000300_ratings_reports_blocks.sql
@@ -1892,193 +1906,1637 @@ comment on column public.trip_requests.vehicle_type is
 
 
 -- ========================================================
--- Seed Data & Demo User
+-- Migration: 20260904000000_group_consent_carbon.sql
 -- ========================================================
 
-INSERT INTO public.users (id, auth_user_id, display_name, gender, is_verified, verified_domain)
-VALUES
-  ('ebc53584-8f5c-4148-8900-9e8afe056bbe', 'ebc53584-8f5c-4148-8900-9e8afe056bbe', 'Demo Commuter', 'female', true, 'nust.edu.pk'),
-  ('10000000-0000-4000-8000-000000000001', null, 'V1 F-10 Rider', 'male', false, null),
-  ('10000000-0000-4000-8000-000000000002', null, 'V1 G-9 Rider', 'male', true, 'comsats.edu.pk'),
-  ('10000000-0000-4000-8000-000000000003', null, 'V2 F-10 Rider', 'female', true, 'nust.edu.pk'),
-  ('10000000-0000-4000-8000-000000000004', null, 'V2 Saddar Rider', 'female', false, null),
-  ('10000000-0000-4000-8000-000000000005', null, 'V3 F-10 Rider', 'male', false, null),
-  ('10000000-0000-4000-8000-000000000006', null, 'V3 G-9 Female-Only Rider', 'female', true, 'qau.edu.pk')
-ON CONFLICT (id) DO UPDATE SET
-  display_name = EXCLUDED.display_name,
-  gender = EXCLUDED.gender;
+-- ─────────────────────────────────────────────────────────────
+-- Migration: Group consent for 3+ rider pools, + carbon savings
+-- ledger shown on every share.
+--
+-- PROBLEM: book_pooled_ride() today inserts a passenger straight as
+-- 'accepted' the moment capacity/safety checks pass. That's fine for
+-- a 1:1 match (both sides already agreed by matching + chatting), but
+-- once a THIRD rider joins an existing pool, the ride changes for
+-- everyone already in it (new co-passenger, longer detour, less
+-- privacy) and none of them were asked. This migration adds an
+-- explicit unanimous-consent gate for any booking that would bring
+-- the ride to 3+ total riders (driver + passengers).
+--
+-- FLOW:
+--  1. book_pooled_ride() runs the same capacity/safety checks as
+--     before. If they pass and the resulting pool is STILL <= 2
+--     total riders, it books straight to 'accepted' exactly as today
+--     — no behavior change for simple 1:1 matches.
+--  2. If they pass and the resulting pool would be >= 3 total riders,
+--     the seat is reserved (available_seats decremented so nobody
+--     else races for it) but the booking is inserted as
+--     'pending_consent', and a ride_consents row is created for the
+--     driver, every existing active passenger, AND the new
+--     candidate — everyone gets a vote on the new group shape.
+--  3. respond_to_ride_consent() records each rider's answer.
+--       - Any single decline cancels the pending booking, restores
+--         the seat, and closes out the remaining consent rows.
+--       - Once every consent row for that booking is 'agreed', the
+--         booking flips to 'accepted' and the pool is finalized.
+--  4. record_ride_carbon_savings() is called once a ride completes,
+--     writing one ledger row per rider so the app can show a running
+--     "CO2 avoided" total, not just a one-off number on the fare
+--     card.
+-- ─────────────────────────────────────────────────────────────
 
--- Active trip requests for matching
-INSERT INTO public.trip_requests (
-  id, user_id,
-  origin_lat, origin_lng, origin_address_label,
-  destination_lat, destination_lng, destination_address_label,
-  requested_departure_at, window_minutes, preference, status, expires_at
-) VALUES
-  ('20000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000001', 33.6844, 73.0479, 'F-10 Markaz', 33.6484, 72.9922, 'NUST Gate 1', NOW() + INTERVAL '1 hour', 60, 'any', 'active', NOW() + INTERVAL '10 days'),
-  ('20000000-0000-4000-8000-000000000002', '10000000-0000-4000-8000-000000000002', 33.6880, 73.0250, 'G-9 Markaz', 33.6484, 72.9922, 'NUST Gate 1', NOW() + INTERVAL '1 hour', 60, 'any', 'active', NOW() + INTERVAL '10 days'),
-  ('20000000-0000-4000-8000-000000000003', '10000000-0000-4000-8000-000000000003', 33.6844, 73.0479, 'F-10 Markaz', 33.6484, 72.9922, 'NUST Gate 1', NOW() + INTERVAL '1 hour', 60, 'female_only', 'active', NOW() + INTERVAL '10 days'),
-  ('20000000-0000-4000-8000-000000000006', '10000000-0000-4000-8000-000000000006', 33.6880, 73.0250, 'G-9 Markaz', 33.6484, 72.9922, 'NUST Gate 1', NOW() + INTERVAL '1 hour', 60, 'female_only', 'active', NOW() + INTERVAL '10 days')
-ON CONFLICT (id) DO UPDATE SET
-  status = EXCLUDED.status,
-  expires_at = EXCLUDED.expires_at;
+-- 1. ride_consents: one row per (booking, rider) vote.
+create table if not exists public.ride_consents (
+  id uuid primary key default gen_random_uuid(),
+  ride_id uuid not null references public.rides(id) on delete cascade,
+  booking_id uuid not null references public.ride_bookings(id) on delete cascade,
+  rider_id uuid not null references public.users(id) on delete cascade,
+  status text not null default 'awaiting', -- 'awaiting' | 'agreed' | 'declined'
+  requested_at timestamp with time zone default now(),
+  responded_at timestamp with time zone,
+  unique (booking_id, rider_id)
+);
 
--- Day 4 addition: a male_only preference pair, since the original 6 seed
--- rows (V1-V3) never exercised 'male_only' — which is exactly the branch
--- the RLS policy bug in 20260822000002 silently dropped.
--- Run after supabase/seed.sql.
+alter table public.ride_consents
+  drop constraint if exists ride_consents_status_check;
+alter table public.ride_consents
+  add constraint ride_consents_status_check
+  check (status in ('awaiting', 'agreed', 'declined'));
 
-INSERT INTO public.users (id, display_name, gender, auth_user_id)
-VALUES
-  ('10000000-0000-4000-8000-000000000007', 'V4 F-10 Male-Only Rider', 'male', null),
-  ('10000000-0000-4000-8000-000000000008', 'V4 G-9 Male Rider', 'male', null)
-ON CONFLICT (id) DO UPDATE SET
-  display_name = EXCLUDED.display_name,
-  gender = EXCLUDED.gender;
+create index if not exists idx_ride_consents_booking on public.ride_consents(booking_id, status);
+create index if not exists idx_ride_consents_rider on public.ride_consents(rider_id, status);
 
-INSERT INTO public.trip_requests (
-  id, user_id,
-  origin_lat, origin_lng, origin_address_label,
-  destination_lat, destination_lng, destination_address_label,
-  requested_departure_at, window_minutes, preference, status, expires_at
+comment on table public.ride_consents is
+  'Per-rider votes gating any booking that would bring a pooled ride to 3+ total riders. All rows for a booking must be agreed before the booking leaves pending_consent.';
+
+-- 2. Loosen the implicit status vocabulary on ride_bookings to include
+--    'pending_consent' (no CHECK constraint existed before this, so
+--    nothing to alter — documenting it here for clarity).
+comment on column public.ride_bookings.status is
+  'pending | pending_consent (awaiting unanimous group consent, 3+ riders) | accepted | completed | cancelled';
+
+-- 3. Carbon savings ledger — one row per rider per completed ride, so
+--    the app can show a running total, not just a per-share estimate.
+create table if not exists public.carbon_savings (
+  id uuid primary key default gen_random_uuid(),
+  ride_id uuid not null references public.rides(id) on delete cascade,
+  rider_id uuid not null references public.users(id) on delete cascade,
+  co2_saved_kg numeric(8,2) not null,
+  rider_count int not null,
+  distance_km numeric(8,2) not null,
+  created_at timestamp with time zone default now(),
+  unique (ride_id, rider_id)
+);
+
+create index if not exists idx_carbon_savings_rider on public.carbon_savings(rider_id);
+
+comment on table public.carbon_savings is
+  'CO2 avoided per rider per completed ride, vs. everyone in the pool driving solo. Sum by rider_id for a profile-level running total.';
+
+-- 4. Replace book_pooled_ride(): same signature/checks as before, but
+--    routes 3+-rider pools through the consent table instead of
+--    auto-accepting.
+CREATE OR REPLACE FUNCTION book_pooled_ride(
+  p_ride_id UUID,
+  p_passenger_id UUID,
+  p_pickup_lat NUMERIC,
+  p_pickup_lng NUMERIC,
+  p_pickup_label TEXT,
+  p_dropoff_lat NUMERIC,
+  p_dropoff_lng NUMERIC,
+  p_dropoff_label TEXT,
+  p_seats_requested INT,
+  p_max_co_passengers INT
 )
-VALUES
-  (
-    '20000000-0000-4000-8000-000000000007',
-    '10000000-0000-4000-8000-000000000007',
-    33.6844, 73.0479, 'F-10 Markaz',
-    33.6484, 72.9922, 'NUST Gate 1',
-    '2026-08-22 08:05:00+05', 15, 'male_only', 'active',
-    '2099-12-31 23:59:59+05'
-  ),
-  (
-    '20000000-0000-4000-8000-000000000008',
-    '10000000-0000-4000-8000-000000000008',
-    33.6880, 73.0250, 'G-9 Markaz',
-    33.6484, 72.9922, 'NUST Gate 1',
-    '2026-08-22 08:05:00+05', 15, 'any', 'active',
-    '2099-12-31 23:59:59+05'
-  )
-ON CONFLICT (id) DO UPDATE SET
-  origin_lat = EXCLUDED.origin_lat,
-  origin_lng = EXCLUDED.origin_lng,
-  status = EXCLUDED.status;
-
-
--- Day 7 demo seed. Run AFTER the four 20260901_* migrations and the
--- original seed.sql (users 10000000-...-0001..0006 must exist).
--- Idempotent: every statement carries an ON CONFLICT branch.
-
--- ─── Verified profiles (Feature 3) ──────────────────────────
--- Real Auth signups earn the badge automatically via POST
--- /api/verify-student; seeded users have no auth email, so the demo
--- flips the flag directly for a believable badge/filter showcase.
-update public.users set is_verified = true, verified_domain = 'comsats.edu.pk'
-  where id = '10000000-0000-4000-8000-000000000002';
-update public.users set is_verified = true, verified_domain = 'nust.edu.pk'
-  where id = '10000000-0000-4000-8000-000000000003';
-update public.users set is_verified = true, verified_domain = 'qau.edu.pk'
-  where id = '10000000-0000-4000-8000-000000000006';
-
--- ─── Completed rides to power the rating flow (Feature 4) ───
-insert into public.rides (
-  id, driver_id,
-  origin_lat, origin_lng, origin_label,
-  destination_lat, destination_lng, destination_label,
-  departure_time, total_seats, available_seats, status
-) values
-  (
-    '30000000-0000-4000-8000-000000000001',
-    '10000000-0000-4000-8000-000000000001',
-    33.6844, 73.0479, 'F-10 Markaz',
-    33.6484, 72.9922, 'NUST Gate 1',
-    '2026-08-30 08:00:00+05', 4, 2, 'completed'
-  ),
-  (
-    '30000000-0000-4000-8000-000000000002',
-    '10000000-0000-4000-8000-000000000005',
-    33.6844, 73.0479, 'F-10 Markaz',
-    33.7007, 73.0578, 'Centaurus Mall',
-    '2026-08-31 18:00:00+05', 4, 3, 'completed'
-  )
-on conflict (id) do update set status = excluded.status;
-
-insert into public.ride_bookings (
-  id, ride_id, passenger_id,
-  pickup_lat, pickup_lng, pickup_label,
-  dropoff_lat, dropoff_lng, dropoff_label,
-  seats_requested, max_co_passengers, status
-) values
-  (
-    '31000000-0000-4000-8000-000000000001',
-    '30000000-0000-4000-8000-000000000001',
-    '10000000-0000-4000-8000-000000000002',
-    33.6880, 73.0250, 'G-9 Markaz',
-    33.6484, 72.9922, 'NUST Gate 1',
-    1, 3, 'completed'
-  ),
-  (
-    '31000000-0000-4000-8000-000000000002',
-    '30000000-0000-4000-8000-000000000001',
-    '10000000-0000-4000-8000-000000000003',
-    33.6844, 73.0479, 'F-10 Markaz',
-    33.6484, 72.9922, 'NUST Gate 1',
-    1, 3, 'completed'
-  ),
-  (
-    '31000000-0000-4000-8000-000000000003',
-    '30000000-0000-4000-8000-000000000002',
-    '10000000-0000-4000-8000-000000000002',
-    33.6844, 73.0479, 'F-10 Markaz',
-    33.7007, 73.0578, 'Centaurus Mall',
-    1, 3, 'completed'
-  )
-on conflict (id) do update set status = excluded.status;
-
--- ─── Ratings (Feature 4) ────────────────────────────────────
--- Averages after this seed: user 0001 -> 4.5 (2), 0002 -> 4.5 (2),
--- 0003 -> 4.0 (1), 0005 -> 5.0 (1). Users 0004/0006 stay unrated so
--- the "No ratings yet" state is also demonstrable.
-insert into public.ratings (ride_id, rater_id, rated_user_id, stars, comment) values
-  ('30000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000002',
-   '10000000-0000-4000-8000-000000000001', 5, 'On time, smooth driving.'),
-  ('30000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000003',
-   '10000000-0000-4000-8000-000000000001', 4, null),
-  ('30000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000001',
-   '10000000-0000-4000-8000-000000000002', 5, 'Great co-rider, easy pickup.'),
-  ('30000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000001',
-   '10000000-0000-4000-8000-000000000003', 4, null),
-  ('30000000-0000-4000-8000-000000000002', '10000000-0000-4000-8000-000000000005',
-   '10000000-0000-4000-8000-000000000002', 4, null),
-  ('30000000-0000-4000-8000-000000000002', '10000000-0000-4000-8000-000000000002',
-   '10000000-0000-4000-8000-000000000005', 5, 'Very polite.')
-on conflict (ride_id, rater_id, rated_user_id) do update set stars = excluded.stars;
-
--- ─── One emergency contact for the demo user (Feature 2) ────
-insert into public.emergency_contacts (id, user_id, contact_name, contact_phone)
-values (
-  '32000000-0000-4000-8000-000000000001',
-  '10000000-0000-4000-8000-000000000001',
-  'Ammi',
-  '+923001234567'
+RETURNS TABLE (
+  booking_id UUID,
+  success BOOLEAN,
+  reason TEXT
 )
-on conflict (id) do update set contact_name = excluded.contact_name;
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_ride RECORD;
+  v_existing_booking RECORD;
+  v_proposed_count INT;         -- co-passengers after join (excludes driver)
+  v_total_riders INT;           -- driver + co-passengers after join
+  v_new_booking_id UUID;
+  v_status TEXT;
+  v_reason TEXT;
+BEGIN
+  SELECT * INTO v_ride
+  FROM rides
+  WHERE id = p_ride_id
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RETURN QUERY SELECT NULL::UUID, FALSE, 'RIDE_NOT_FOUND';
+    RETURN;
+  END IF;
+
+  IF v_ride.status != 'active' THEN
+    RETURN QUERY SELECT NULL::UUID, FALSE, 'RIDE_NOT_ACTIVE';
+    RETURN;
+  END IF;
+
+  SELECT COUNT(*) INTO v_proposed_count
+  FROM ride_bookings
+  WHERE ride_id = p_ride_id AND status IN ('accepted', 'pending', 'pending_consent');
+
+  v_proposed_count := v_proposed_count + 1;
+  v_total_riders := v_proposed_count + 1; -- + driver
+
+  -- 1. Driver Cap
+  IF v_ride.driver_max_co_passengers IS NOT NULL AND v_proposed_count > v_ride.driver_max_co_passengers THEN
+    RETURN QUERY SELECT NULL::UUID, FALSE, 'DRIVER_CAP_EXCEEDED';
+    RETURN;
+  END IF;
+
+  -- 2. Candidate Passenger Cap
+  IF p_max_co_passengers IS NOT NULL AND p_max_co_passengers != -1 AND v_proposed_count > p_max_co_passengers THEN
+    RETURN QUERY SELECT NULL::UUID, FALSE, 'PASSENGER_CAP_EXCEEDED';
+    RETURN;
+  END IF;
+
+  -- 3. Existing Passengers' Caps ("most restrictive passenger wins")
+  FOR v_existing_booking IN
+    SELECT max_co_passengers
+    FROM ride_bookings
+    WHERE ride_id = p_ride_id AND status IN ('accepted', 'pending', 'pending_consent')
+  LOOP
+    IF v_existing_booking.max_co_passengers IS NOT NULL
+       AND v_existing_booking.max_co_passengers != -1
+       AND v_proposed_count > v_existing_booking.max_co_passengers THEN
+      RETURN QUERY SELECT NULL::UUID, FALSE, 'EXISTING_PASSENGER_CAP_VIOLATED';
+      RETURN;
+    END IF;
+  END LOOP;
+
+  -- 4. Seat Availability
+  IF v_ride.available_seats < p_seats_requested THEN
+    RETURN QUERY SELECT NULL::UUID, FALSE, 'INSUFFICIENT_SEATS';
+    RETURN;
+  END IF;
+
+  -- Decide status: 2 total riders (driver + this passenger, nobody
+  -- else in the pool) auto-accepts exactly like before. 3+ total
+  -- riders requires unanimous consent from everyone in the new group.
+  IF v_total_riders >= 3 THEN
+    v_status := 'pending_consent';
+    v_reason := 'AWAITING_GROUP_CONSENT';
+  ELSE
+    v_status := 'accepted';
+    v_reason := 'SUCCESS';
+  END IF;
+
+  INSERT INTO ride_bookings (
+    ride_id, passenger_id, pickup_lat, pickup_lng, pickup_label,
+    dropoff_lat, dropoff_lng, dropoff_label, seats_requested, max_co_passengers, status
+  ) VALUES (
+    p_ride_id, p_passenger_id, p_pickup_lat, p_pickup_lng, p_pickup_label,
+    p_dropoff_lat, p_dropoff_lng, p_dropoff_label, p_seats_requested, p_max_co_passengers, v_status
+  ) RETURNING id INTO v_new_booking_id;
+
+  -- Reserve the seat immediately either way, so nobody else can race
+  -- for it while consent is pending. Declines restore it (see
+  -- respond_to_ride_consent below).
+  UPDATE rides
+  SET available_seats = available_seats - p_seats_requested
+  WHERE id = p_ride_id;
+
+  IF v_status = 'pending_consent' THEN
+    -- One consent row for the joining candidate...
+    INSERT INTO ride_consents (ride_id, booking_id, rider_id, status)
+    VALUES (p_ride_id, v_new_booking_id, p_passenger_id, 'awaiting');
+
+    -- ...and one for the driver...
+    INSERT INTO ride_consents (ride_id, booking_id, rider_id, status)
+    VALUES (p_ride_id, v_new_booking_id, v_ride.driver_id, 'awaiting');
+
+    -- ...and one for every other currently-accepted passenger in the
+    -- pool (people already riding, whose ride is about to change).
+    INSERT INTO ride_consents (ride_id, booking_id, rider_id, status)
+    SELECT p_ride_id, v_new_booking_id, rb.passenger_id, 'awaiting'
+    FROM ride_bookings rb
+    WHERE rb.ride_id = p_ride_id
+      AND rb.status = 'accepted'
+      AND rb.id != v_new_booking_id;
+  END IF;
+
+  RETURN QUERY SELECT v_new_booking_id, TRUE, v_reason;
+END;
+$$;
+
+-- 5. respond_to_ride_consent(): records one rider's vote and
+--    finalizes or rejects the booking once everyone has answered.
+CREATE OR REPLACE FUNCTION respond_to_ride_consent(
+  p_booking_id UUID,
+  p_rider_id UUID,
+  p_agree BOOLEAN
+)
+RETURNS TABLE (
+  success BOOLEAN,
+  booking_status TEXT,
+  reason TEXT
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_booking RECORD;
+  v_consent RECORD;
+  v_awaiting_count INT;
+  v_declined_count INT;
+BEGIN
+  -- Lock the booking row so two simultaneous votes can't both think
+  -- they're the one finalizing it.
+  SELECT * INTO v_booking
+  FROM ride_bookings
+  WHERE id = p_booking_id
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RETURN QUERY SELECT FALSE, NULL::TEXT, 'BOOKING_NOT_FOUND';
+    RETURN;
+  END IF;
+
+  IF v_booking.status != 'pending_consent' THEN
+    RETURN QUERY SELECT FALSE, v_booking.status, 'NOT_AWAITING_CONSENT';
+    RETURN;
+  END IF;
+
+  SELECT * INTO v_consent
+  FROM ride_consents
+  WHERE booking_id = p_booking_id AND rider_id = p_rider_id
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RETURN QUERY SELECT FALSE, v_booking.status, 'NOT_A_VOTER_ON_THIS_BOOKING';
+    RETURN;
+  END IF;
+
+  IF v_consent.status != 'awaiting' THEN
+    RETURN QUERY SELECT FALSE, v_booking.status, 'ALREADY_RESPONDED';
+    RETURN;
+  END IF;
+
+  UPDATE ride_consents
+  SET status = CASE WHEN p_agree THEN 'agreed' ELSE 'declined' END,
+      responded_at = now()
+  WHERE id = v_consent.id;
+
+  IF NOT p_agree THEN
+    -- One decline is enough to cancel this join. Restore the
+    -- reserved seat and close out the remaining votes.
+    UPDATE ride_bookings SET status = 'cancelled' WHERE id = p_booking_id;
+    UPDATE rides SET available_seats = available_seats + v_booking.seats_requested WHERE id = v_booking.ride_id;
+    UPDATE ride_consents SET status = 'declined', responded_at = now()
+      WHERE booking_id = p_booking_id AND status = 'awaiting';
+
+    RETURN QUERY SELECT TRUE, 'cancelled', 'DECLINED';
+    RETURN;
+  END IF;
+
+  SELECT
+    COUNT(*) FILTER (WHERE status = 'awaiting') ,
+    COUNT(*) FILTER (WHERE status = 'declined')
+  INTO v_awaiting_count, v_declined_count
+  FROM ride_consents
+  WHERE booking_id = p_booking_id;
+
+  IF v_declined_count > 0 THEN
+    RETURN QUERY SELECT TRUE, 'cancelled', 'DECLINED';
+    RETURN;
+  END IF;
+
+  IF v_awaiting_count = 0 THEN
+    UPDATE ride_bookings SET status = 'accepted' WHERE id = p_booking_id;
+    RETURN QUERY SELECT TRUE, 'accepted', 'ALL_AGREED';
+    RETURN;
+  END IF;
+
+  RETURN QUERY SELECT TRUE, 'pending_consent', 'AWAITING_OTHERS';
+END;
+$$;
+
+-- 6. record_ride_carbon_savings(): call once when a ride completes.
+--    Splits the CO2 avoided (vs. every rider driving solo) evenly
+--    across the driver + accepted passengers and writes one ledger
+--    row per rider for a running profile total.
+CREATE OR REPLACE FUNCTION record_ride_carbon_savings(
+  p_ride_id UUID,
+  p_distance_km NUMERIC,
+  p_co2_kg_per_km_solo NUMERIC DEFAULT 0.21
+)
+RETURNS SETOF public.carbon_savings
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_ride RECORD;
+  v_rider_count INT;
+  v_total_saved NUMERIC;
+  v_per_rider NUMERIC;
+BEGIN
+  SELECT * INTO v_ride FROM rides WHERE id = p_ride_id;
+  IF NOT FOUND THEN
+    RETURN;
+  END IF;
+
+  SELECT COUNT(*) + 1 INTO v_rider_count -- +1 for the driver
+  FROM ride_bookings
+  WHERE ride_id = p_ride_id AND status = 'accepted';
+
+  IF v_rider_count < 2 THEN
+    RETURN; -- solo ride, nothing shared, nothing avoided
+  END IF;
+
+  -- (riders - 1) solo trips avoided, at p_co2_kg_per_km_solo per km.
+  v_total_saved := p_distance_km * p_co2_kg_per_km_solo * (v_rider_count - 1);
+  v_per_rider := round(v_total_saved / v_rider_count, 2);
+
+  INSERT INTO carbon_savings (ride_id, rider_id, co2_saved_kg, rider_count, distance_km)
+  VALUES (p_ride_id, v_ride.driver_id, v_per_rider, v_rider_count, p_distance_km)
+  ON CONFLICT (ride_id, rider_id) DO NOTHING;
+
+  INSERT INTO carbon_savings (ride_id, rider_id, co2_saved_kg, rider_count, distance_km)
+  SELECT p_ride_id, rb.passenger_id, v_per_rider, v_rider_count, p_distance_km
+  FROM ride_bookings rb
+  WHERE rb.ride_id = p_ride_id AND rb.status = 'accepted'
+  ON CONFLICT (ride_id, rider_id) DO NOTHING;
+
+  RETURN QUERY SELECT * FROM carbon_savings WHERE ride_id = p_ride_id;
+END;
+$$;
+
+-- 7. RLS: ride_consents follows the same auth_user_id -> users.id
+--    pattern as ride_bookings/rides (20260826000000_pooling_rls.sql).
+--    A rider can only ever see/answer their own vote — not the whole
+--    group's ballot.
+alter table public.ride_consents enable row level security;
+
+drop policy if exists ride_consents_select on public.ride_consents;
+create policy ride_consents_select
+on public.ride_consents
+for select
+to authenticated
+using (
+  rider_id in (
+    select person.id from public.users as person
+    where person.auth_user_id = auth.uid()
+  )
+);
+
+-- No direct insert/update policy: rows are only ever written by the
+-- SECURITY DEFINER functions below, never by a client-side write.
+revoke all on public.ride_consents from public;
+grant select on public.ride_consents to authenticated;
+
+alter table public.carbon_savings enable row level security;
+
+drop policy if exists carbon_savings_select on public.carbon_savings;
+create policy carbon_savings_select
+on public.carbon_savings
+for select
+to authenticated
+using (
+  rider_id in (
+    select person.id from public.users as person
+    where person.auth_user_id = auth.uid()
+  )
+);
+
+revoke all on public.carbon_savings from public;
+grant select on public.carbon_savings to authenticated;
+
+revoke all on function public.book_pooled_ride(
+  uuid, uuid, numeric, numeric, text, numeric, numeric, text, int, int
+) from public;
+grant execute on function public.book_pooled_ride(
+  uuid, uuid, numeric, numeric, text, numeric, numeric, text, int, int
+) to authenticated;
+alter function public.book_pooled_ride(
+  uuid, uuid, numeric, numeric, text, numeric, numeric, text, int, int
+) security definer
+set search_path = public;
+
+revoke all on function public.respond_to_ride_consent(uuid, uuid, boolean) from public;
+grant execute on function public.respond_to_ride_consent(uuid, uuid, boolean) to authenticated;
+alter function public.respond_to_ride_consent(uuid, uuid, boolean)
+  security definer
+  set search_path = public;
+
+revoke all on function public.record_ride_carbon_savings(uuid, numeric, numeric) from public;
+grant execute on function public.record_ride_carbon_savings(uuid, numeric, numeric) to authenticated;
+alter function public.record_ride_carbon_savings(uuid, numeric, numeric)
+  security definer
+  set search_path = public;
 
 
+-- ========================================================
+-- Migration: 20260905000000_consent_expiry.sql
+-- ========================================================
 
--- =====================================================================
--- NOTE: This aggregate bundles schema through 20260902000000 plus the
--- SafarSync pooling migration below. For a guaranteed end-to-end fresh
--- project (all consent/notifications/realtime migrations in order), run
--- supabase/RUN_ALL_MIGRATIONS.sql instead. The block below only depends
--- on rides / ride_bookings / users / trip_requests, all present above,
--- so appending it here stays valid.
--- =====================================================================
+-- ─────────────────────────────────────────────────────────────
+-- Migration: Consent expiry.
+--
+-- PROBLEM: 20260904000000_group_consent_carbon.sql introduced
+-- pending_consent bookings that reserve a seat immediately but only
+-- ever leave that state via respond_to_ride_consent(). If any one
+-- rider in the group simply never votes, the booking sits in
+-- pending_consent forever, the seat stays reserved forever, and
+-- nothing in the system can recover it. That's a real gap, not a
+-- theoretical one — real users disengage from apps constantly.
+--
+-- FIX: give every pending_consent booking a deadline. Past it, the
+-- booking is treated as cancelled, the seat is restored, and any
+-- still-"awaiting" votes are marked "expired" (distinct from
+-- "declined" — nobody said no, the clock just ran out).
+-- ─────────────────────────────────────────────────────────────
 
--- =====================================================================
--- FILE: 20261022000000_safarsync_pooling.sql
--- =====================================================================
--- в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+-- 1. Every pending_consent booking gets a deadline.
+alter table public.ride_bookings
+  add column if not exists expires_at timestamp with time zone;
+
+comment on column public.ride_bookings.expires_at is
+  'Only meaningful while status = pending_consent. Past this timestamp the booking is stale and must be treated as cancelled — see expire_stale_consent_bookings().';
+
+comment on column public.ride_bookings.status is
+  'pending | pending_consent (awaiting unanimous group consent, 3+ riders, until expires_at) | accepted | completed | cancelled';
+
+-- 2. "expired" joins the vote vocabulary alongside awaiting/agreed/declined.
+alter table public.ride_consents
+  drop constraint if exists ride_consents_status_check;
+alter table public.ride_consents
+  add constraint ride_consents_status_check
+  check (status in ('awaiting', 'agreed', 'declined', 'expired'));
+
+-- 3. book_pooled_ride(): identical to before, except a pending_consent
+--    booking now gets a 30-minute deadline.
+CREATE OR REPLACE FUNCTION book_pooled_ride(
+  p_ride_id UUID,
+  p_passenger_id UUID,
+  p_pickup_lat NUMERIC,
+  p_pickup_lng NUMERIC,
+  p_pickup_label TEXT,
+  p_dropoff_lat NUMERIC,
+  p_dropoff_lng NUMERIC,
+  p_dropoff_label TEXT,
+  p_seats_requested INT,
+  p_max_co_passengers INT
+)
+RETURNS TABLE (
+  booking_id UUID,
+  success BOOLEAN,
+  reason TEXT
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_ride RECORD;
+  v_existing_booking RECORD;
+  v_proposed_count INT;
+  v_total_riders INT;
+  v_new_booking_id UUID;
+  v_status TEXT;
+  v_reason TEXT;
+  v_expires_at TIMESTAMPTZ;
+BEGIN
+  SELECT * INTO v_ride
+  FROM rides
+  WHERE id = p_ride_id
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RETURN QUERY SELECT NULL::UUID, FALSE, 'RIDE_NOT_FOUND';
+    RETURN;
+  END IF;
+
+  IF v_ride.status != 'active' THEN
+    RETURN QUERY SELECT NULL::UUID, FALSE, 'RIDE_NOT_ACTIVE';
+    RETURN;
+  END IF;
+
+  SELECT COUNT(*) INTO v_proposed_count
+  FROM ride_bookings
+  WHERE ride_id = p_ride_id AND status IN ('accepted', 'pending', 'pending_consent');
+
+  v_proposed_count := v_proposed_count + 1;
+  v_total_riders := v_proposed_count + 1;
+
+  IF v_ride.driver_max_co_passengers IS NOT NULL AND v_proposed_count > v_ride.driver_max_co_passengers THEN
+    RETURN QUERY SELECT NULL::UUID, FALSE, 'DRIVER_CAP_EXCEEDED';
+    RETURN;
+  END IF;
+
+  IF p_max_co_passengers IS NOT NULL AND p_max_co_passengers != -1 AND v_proposed_count > p_max_co_passengers THEN
+    RETURN QUERY SELECT NULL::UUID, FALSE, 'PASSENGER_CAP_EXCEEDED';
+    RETURN;
+  END IF;
+
+  FOR v_existing_booking IN
+    SELECT max_co_passengers
+    FROM ride_bookings
+    WHERE ride_id = p_ride_id AND status IN ('accepted', 'pending', 'pending_consent')
+  LOOP
+    IF v_existing_booking.max_co_passengers IS NOT NULL
+       AND v_existing_booking.max_co_passengers != -1
+       AND v_proposed_count > v_existing_booking.max_co_passengers THEN
+      RETURN QUERY SELECT NULL::UUID, FALSE, 'EXISTING_PASSENGER_CAP_VIOLATED';
+      RETURN;
+    END IF;
+  END LOOP;
+
+  IF v_ride.available_seats < p_seats_requested THEN
+    RETURN QUERY SELECT NULL::UUID, FALSE, 'INSUFFICIENT_SEATS';
+    RETURN;
+  END IF;
+
+  IF v_total_riders >= 3 THEN
+    v_status := 'pending_consent';
+    v_reason := 'AWAITING_GROUP_CONSENT';
+    v_expires_at := now() + interval '30 minutes';
+  ELSE
+    v_status := 'accepted';
+    v_reason := 'SUCCESS';
+    v_expires_at := NULL;
+  END IF;
+
+  INSERT INTO ride_bookings (
+    ride_id, passenger_id, pickup_lat, pickup_lng, pickup_label,
+    dropoff_lat, dropoff_lng, dropoff_label, seats_requested, max_co_passengers, status, expires_at
+  ) VALUES (
+    p_ride_id, p_passenger_id, p_pickup_lat, p_pickup_lng, p_pickup_label,
+    p_dropoff_lat, p_dropoff_lng, p_dropoff_label, p_seats_requested, p_max_co_passengers, v_status, v_expires_at
+  ) RETURNING id INTO v_new_booking_id;
+
+  UPDATE rides
+  SET available_seats = available_seats - p_seats_requested
+  WHERE id = p_ride_id;
+
+  IF v_status = 'pending_consent' THEN
+    INSERT INTO ride_consents (ride_id, booking_id, rider_id, status)
+    VALUES (p_ride_id, v_new_booking_id, p_passenger_id, 'awaiting');
+
+    INSERT INTO ride_consents (ride_id, booking_id, rider_id, status)
+    VALUES (p_ride_id, v_new_booking_id, v_ride.driver_id, 'awaiting');
+
+    INSERT INTO ride_consents (ride_id, booking_id, rider_id, status)
+    SELECT p_ride_id, v_new_booking_id, rb.passenger_id, 'awaiting'
+    FROM ride_bookings rb
+    WHERE rb.ride_id = p_ride_id
+      AND rb.status = 'accepted'
+      AND rb.id != v_new_booking_id;
+  END IF;
+
+  RETURN QUERY SELECT v_new_booking_id, TRUE, v_reason;
+END;
+$$;
+
+-- 4. respond_to_ride_consent(): now checks the deadline first. A vote
+--    arriving after expires_at must not be able to resurrect a
+--    booking whose seat may already be considered forfeited.
+CREATE OR REPLACE FUNCTION respond_to_ride_consent(
+  p_booking_id UUID,
+  p_rider_id UUID,
+  p_agree BOOLEAN
+)
+RETURNS TABLE (
+  success BOOLEAN,
+  booking_status TEXT,
+  reason TEXT
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_booking RECORD;
+  v_consent RECORD;
+  v_awaiting_count INT;
+  v_declined_count INT;
+BEGIN
+  SELECT * INTO v_booking
+  FROM ride_bookings
+  WHERE id = p_booking_id
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RETURN QUERY SELECT FALSE, NULL::TEXT, 'BOOKING_NOT_FOUND';
+    RETURN;
+  END IF;
+
+  IF v_booking.status = 'pending_consent' AND v_booking.expires_at IS NOT NULL AND v_booking.expires_at < now() THEN
+    UPDATE ride_bookings SET status = 'cancelled' WHERE id = p_booking_id;
+    UPDATE rides SET available_seats = available_seats + v_booking.seats_requested WHERE id = v_booking.ride_id;
+    UPDATE ride_consents SET status = 'expired', responded_at = now()
+      WHERE booking_id = p_booking_id AND status = 'awaiting';
+
+    RETURN QUERY SELECT FALSE, 'cancelled', 'CONSENT_EXPIRED';
+    RETURN;
+  END IF;
+
+  IF v_booking.status != 'pending_consent' THEN
+    RETURN QUERY SELECT FALSE, v_booking.status, 'NOT_AWAITING_CONSENT';
+    RETURN;
+  END IF;
+
+  SELECT * INTO v_consent
+  FROM ride_consents
+  WHERE booking_id = p_booking_id AND rider_id = p_rider_id
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RETURN QUERY SELECT FALSE, v_booking.status, 'NOT_A_VOTER_ON_THIS_BOOKING';
+    RETURN;
+  END IF;
+
+  IF v_consent.status != 'awaiting' THEN
+    RETURN QUERY SELECT FALSE, v_booking.status, 'ALREADY_RESPONDED';
+    RETURN;
+  END IF;
+
+  UPDATE ride_consents
+  SET status = CASE WHEN p_agree THEN 'agreed' ELSE 'declined' END,
+      responded_at = now()
+  WHERE id = v_consent.id;
+
+  IF NOT p_agree THEN
+    UPDATE ride_bookings SET status = 'cancelled' WHERE id = p_booking_id;
+    UPDATE rides SET available_seats = available_seats + v_booking.seats_requested WHERE id = v_booking.ride_id;
+    UPDATE ride_consents SET status = 'declined', responded_at = now()
+      WHERE booking_id = p_booking_id AND status = 'awaiting';
+
+    RETURN QUERY SELECT TRUE, 'cancelled', 'DECLINED';
+    RETURN;
+  END IF;
+
+  SELECT
+    COUNT(*) FILTER (WHERE status = 'awaiting'),
+    COUNT(*) FILTER (WHERE status = 'declined')
+  INTO v_awaiting_count, v_declined_count
+  FROM ride_consents
+  WHERE booking_id = p_booking_id;
+
+  IF v_declined_count > 0 THEN
+    RETURN QUERY SELECT TRUE, 'cancelled', 'DECLINED';
+    RETURN;
+  END IF;
+
+  IF v_awaiting_count = 0 THEN
+    UPDATE ride_bookings SET status = 'accepted' WHERE id = p_booking_id;
+    RETURN QUERY SELECT TRUE, 'accepted', 'ALL_AGREED';
+    RETURN;
+  END IF;
+
+  RETURN QUERY SELECT TRUE, 'pending_consent', 'AWAITING_OTHERS';
+END;
+$$;
+
+-- 5. Bulk sweep, callable from the API layer before any read of
+--    pending consents (lazy expiry — no pg_cron dependency required
+--    for correctness) and optionally on a schedule if pg_cron is
+--    available on this project.
+CREATE OR REPLACE FUNCTION expire_stale_consent_bookings()
+RETURNS TABLE (booking_id UUID)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_row RECORD;
+BEGIN
+  FOR v_row IN
+    SELECT id, ride_id, seats_requested
+    FROM ride_bookings
+    WHERE status = 'pending_consent'
+      AND expires_at IS NOT NULL
+      AND expires_at < now()
+    FOR UPDATE
+  LOOP
+    UPDATE ride_bookings SET status = 'cancelled' WHERE id = v_row.id;
+    UPDATE rides SET available_seats = available_seats + v_row.seats_requested WHERE id = v_row.ride_id;
+    -- Table alias required: this function's OUT parameter is also
+    -- named booking_id, so a bare reference here is ambiguous between
+    -- the ride_consents column and the OUT parameter (caught by
+    -- actually running this function against a real database, not by
+    -- CREATE FUNCTION's parse-time check alone).
+    UPDATE ride_consents rc SET status = 'expired', responded_at = now()
+      WHERE rc.booking_id = v_row.id AND rc.status = 'awaiting';
+
+    booking_id := v_row.id;
+    RETURN NEXT;
+  END LOOP;
+END;
+$$;
+
+revoke all on function public.expire_stale_consent_bookings() from public;
+grant execute on function public.expire_stale_consent_bookings() to authenticated, service_role;
+alter function public.expire_stale_consent_bookings()
+  security definer
+  set search_path = public;
+
+-- 6. Best-effort scheduled sweep every 5 minutes, so seats free up
+--    even if nobody happens to hit an endpoint that triggers the lazy
+--    check. Wrapped in a guard because pg_cron isn't enabled on every
+--    Supabase project/tier — if it's missing, this silently no-ops
+--    and the lazy per-request expiry (called from apiHandler.ts)
+--    still guarantees correctness, just not proactively.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
+    PERFORM cron.unschedule('expire-stale-consent-bookings')
+    WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'expire-stale-consent-bookings');
+
+    PERFORM cron.schedule(
+      'expire-stale-consent-bookings',
+      '*/5 * * * *',
+      $sql$SELECT public.expire_stale_consent_bookings();$sql$
+    );
+  END IF;
+EXCEPTION WHEN OTHERS THEN
+  -- pg_cron present but this role can't manage jobs, or any other
+  -- environment quirk — never fail the migration over a best-effort
+  -- scheduling nicety.
+  NULL;
+END $$;
+
+
+-- ========================================================
+-- Migration: 20260906000000_notifications.sql
+-- ========================================================
+
+-- ─────────────────────────────────────────────────────────────
+-- Migration: In-app notification feed.
+--
+-- PROBLEM: a pending_consent vote (see
+-- 20260904000000_group_consent_carbon.sql /
+-- 20260905000000_consent_expiry.sql) is invisible to a rider unless
+-- they happen to have the app open and PendingConsentsPanel happens
+-- to poll while it's still awaiting. Since consent now safely expires
+-- after 30 minutes, a real, would-have-been-agreed join can silently
+-- time out purely from lack of notice — undercutting the feature we
+-- just made safe.
+--
+-- WHY A FEED, NOT PUSH/SMS: real push needs a device token, and SMS
+-- needs a phone number for the RIDER THEMSELVES — today only
+-- emergency_contacts.contact_phone exists, not a phone number on
+-- `users`. Wiring either also needs an external provider (FCM /
+-- Twilio) with credentials this project doesn't have. An in-app feed
+-- is the piece that's actually deliverable today, and it's the same
+-- foundation real push would sit on later (this migration is the
+-- event-producing side; delivery can be layered on without touching
+-- it again).
+-- ─────────────────────────────────────────────────────────────
+
+create table if not exists public.notifications (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.users(id) on delete cascade,
+  kind text not null check (kind in (
+    'consent_requested', 'consent_reminder', 'consent_resolved', 'consent_expired'
+  )),
+  title text not null,
+  body text not null,
+  ride_id uuid references public.rides(id) on delete set null,
+  booking_id uuid references public.ride_bookings(id) on delete set null,
+  created_at timestamp with time zone default now(),
+  read_at timestamp with time zone
+);
+
+create index if not exists idx_notifications_user_unread
+  on public.notifications(user_id, created_at desc)
+  where read_at is null;
+
+comment on table public.notifications is
+  'In-app notification feed. Written only by SECURITY DEFINER functions triggered from the consent-voting flow — never inserted directly by a client.';
+
+-- A booking is nudged at most once as its deadline approaches.
+alter table public.ride_bookings
+  add column if not exists nudged_at timestamp with time zone;
+
+comment on column public.ride_bookings.nudged_at is
+  'Set once the ~5-minute-left reminder has been sent for this pending_consent booking, so notify_near_expiry_consents() never nudges the same booking twice.';
+
+-- RLS: a rider only ever sees their own notifications.
+alter table public.notifications enable row level security;
+
+drop policy if exists notifications_select on public.notifications;
+create policy notifications_select
+on public.notifications
+for select
+to authenticated
+using (
+  user_id in (
+    select person.id from public.users as person
+    where person.auth_user_id = auth.uid()
+  )
+);
+
+revoke all on public.notifications from public;
+grant select on public.notifications to authenticated;
+
+-- ─────────────────────────────────────────────────────────────
+-- book_pooled_ride(): identical to the expiry-aware version in
+-- 20260905000000_consent_expiry.sql, plus a notification for every
+-- voter (including the joiner, so their own request shows in their
+-- feed too) the moment a pending_consent booking is created.
+-- ─────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION book_pooled_ride(
+  p_ride_id UUID,
+  p_passenger_id UUID,
+  p_pickup_lat NUMERIC,
+  p_pickup_lng NUMERIC,
+  p_pickup_label TEXT,
+  p_dropoff_lat NUMERIC,
+  p_dropoff_lng NUMERIC,
+  p_dropoff_label TEXT,
+  p_seats_requested INT,
+  p_max_co_passengers INT
+)
+RETURNS TABLE (
+  booking_id UUID,
+  success BOOLEAN,
+  reason TEXT
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_ride RECORD;
+  v_existing_booking RECORD;
+  v_proposed_count INT;
+  v_total_riders INT;
+  v_new_booking_id UUID;
+  v_status TEXT;
+  v_reason TEXT;
+  v_expires_at TIMESTAMPTZ;
+  v_joiner_name TEXT;
+  v_voter RECORD;
+BEGIN
+  SELECT * INTO v_ride
+  FROM rides
+  WHERE id = p_ride_id
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RETURN QUERY SELECT NULL::UUID, FALSE, 'RIDE_NOT_FOUND';
+    RETURN;
+  END IF;
+
+  IF v_ride.status != 'active' THEN
+    RETURN QUERY SELECT NULL::UUID, FALSE, 'RIDE_NOT_ACTIVE';
+    RETURN;
+  END IF;
+
+  SELECT COUNT(*) INTO v_proposed_count
+  FROM ride_bookings
+  WHERE ride_id = p_ride_id AND status IN ('accepted', 'pending', 'pending_consent');
+
+  v_proposed_count := v_proposed_count + 1;
+  v_total_riders := v_proposed_count + 1;
+
+  IF v_ride.driver_max_co_passengers IS NOT NULL AND v_proposed_count > v_ride.driver_max_co_passengers THEN
+    RETURN QUERY SELECT NULL::UUID, FALSE, 'DRIVER_CAP_EXCEEDED';
+    RETURN;
+  END IF;
+
+  IF p_max_co_passengers IS NOT NULL AND p_max_co_passengers != -1 AND v_proposed_count > p_max_co_passengers THEN
+    RETURN QUERY SELECT NULL::UUID, FALSE, 'PASSENGER_CAP_EXCEEDED';
+    RETURN;
+  END IF;
+
+  FOR v_existing_booking IN
+    SELECT max_co_passengers
+    FROM ride_bookings
+    WHERE ride_id = p_ride_id AND status IN ('accepted', 'pending', 'pending_consent')
+  LOOP
+    IF v_existing_booking.max_co_passengers IS NOT NULL
+       AND v_existing_booking.max_co_passengers != -1
+       AND v_proposed_count > v_existing_booking.max_co_passengers THEN
+      RETURN QUERY SELECT NULL::UUID, FALSE, 'EXISTING_PASSENGER_CAP_VIOLATED';
+      RETURN;
+    END IF;
+  END LOOP;
+
+  IF v_ride.available_seats < p_seats_requested THEN
+    RETURN QUERY SELECT NULL::UUID, FALSE, 'INSUFFICIENT_SEATS';
+    RETURN;
+  END IF;
+
+  IF v_total_riders >= 3 THEN
+    v_status := 'pending_consent';
+    v_reason := 'AWAITING_GROUP_CONSENT';
+    v_expires_at := now() + interval '30 minutes';
+  ELSE
+    v_status := 'accepted';
+    v_reason := 'SUCCESS';
+    v_expires_at := NULL;
+  END IF;
+
+  INSERT INTO ride_bookings (
+    ride_id, passenger_id, pickup_lat, pickup_lng, pickup_label,
+    dropoff_lat, dropoff_lng, dropoff_label, seats_requested, max_co_passengers, status, expires_at
+  ) VALUES (
+    p_ride_id, p_passenger_id, p_pickup_lat, p_pickup_lng, p_pickup_label,
+    p_dropoff_lat, p_dropoff_lng, p_dropoff_label, p_seats_requested, p_max_co_passengers, v_status, v_expires_at
+  ) RETURNING id INTO v_new_booking_id;
+
+  UPDATE rides
+  SET available_seats = available_seats - p_seats_requested
+  WHERE id = p_ride_id;
+
+  IF v_status = 'pending_consent' THEN
+    INSERT INTO ride_consents (ride_id, booking_id, rider_id, status)
+    VALUES (p_ride_id, v_new_booking_id, p_passenger_id, 'awaiting');
+
+    INSERT INTO ride_consents (ride_id, booking_id, rider_id, status)
+    VALUES (p_ride_id, v_new_booking_id, v_ride.driver_id, 'awaiting');
+
+    INSERT INTO ride_consents (ride_id, booking_id, rider_id, status)
+    SELECT p_ride_id, v_new_booking_id, rb.passenger_id, 'awaiting'
+    FROM ride_bookings rb
+    WHERE rb.ride_id = p_ride_id
+      AND rb.status = 'accepted'
+      AND rb.id != v_new_booking_id;
+
+    SELECT display_name INTO v_joiner_name FROM users WHERE id = p_passenger_id;
+    v_joiner_name := COALESCE(v_joiner_name, 'A rider');
+
+    -- Table alias required: this function's OUT parameter is also
+    -- named booking_id, so a bare reference is ambiguous between the
+    -- ride_consents column and the OUT parameter — caught by actually
+    -- running this function, not by CREATE FUNCTION's parse-time
+    -- check alone.
+    FOR v_voter IN
+      SELECT DISTINCT rc.rider_id FROM ride_consents rc WHERE rc.booking_id = v_new_booking_id
+    LOOP
+      INSERT INTO notifications (user_id, kind, title, body, ride_id, booking_id)
+      VALUES (
+        v_voter.rider_id,
+        'consent_requested',
+        'Group approval needed',
+        v_joiner_name || ' wants to join your shared ride. Everyone in the group needs to agree.',
+        p_ride_id,
+        v_new_booking_id
+      );
+    END LOOP;
+  END IF;
+
+  RETURN QUERY SELECT v_new_booking_id, TRUE, v_reason;
+END;
+$$;
+
+-- ─────────────────────────────────────────────────────────────
+-- respond_to_ride_consent(): identical logic to the expiry-aware
+-- version, plus a "your request was answered" / "expired" notice for
+-- the joiner (booking.passenger_id) at each terminal outcome.
+-- ─────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION respond_to_ride_consent(
+  p_booking_id UUID,
+  p_rider_id UUID,
+  p_agree BOOLEAN
+)
+RETURNS TABLE (
+  success BOOLEAN,
+  booking_status TEXT,
+  reason TEXT
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_booking RECORD;
+  v_consent RECORD;
+  v_awaiting_count INT;
+  v_declined_count INT;
+BEGIN
+  SELECT * INTO v_booking
+  FROM ride_bookings
+  WHERE id = p_booking_id
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RETURN QUERY SELECT FALSE, NULL::TEXT, 'BOOKING_NOT_FOUND';
+    RETURN;
+  END IF;
+
+  IF v_booking.status = 'pending_consent' AND v_booking.expires_at IS NOT NULL AND v_booking.expires_at < now() THEN
+    UPDATE ride_bookings SET status = 'cancelled' WHERE id = p_booking_id;
+    UPDATE rides SET available_seats = available_seats + v_booking.seats_requested WHERE id = v_booking.ride_id;
+    UPDATE ride_consents SET status = 'expired', responded_at = now()
+      WHERE booking_id = p_booking_id AND status = 'awaiting';
+
+    INSERT INTO notifications (user_id, kind, title, body, ride_id, booking_id)
+    VALUES (
+      v_booking.passenger_id,
+      'consent_expired',
+      'Join request expired',
+      'Nobody finished voting in time, so your request to join was automatically cancelled.',
+      v_booking.ride_id,
+      p_booking_id
+    );
+
+    RETURN QUERY SELECT FALSE, 'cancelled', 'CONSENT_EXPIRED';
+    RETURN;
+  END IF;
+
+  IF v_booking.status != 'pending_consent' THEN
+    RETURN QUERY SELECT FALSE, v_booking.status, 'NOT_AWAITING_CONSENT';
+    RETURN;
+  END IF;
+
+  SELECT * INTO v_consent
+  FROM ride_consents
+  WHERE booking_id = p_booking_id AND rider_id = p_rider_id
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RETURN QUERY SELECT FALSE, v_booking.status, 'NOT_A_VOTER_ON_THIS_BOOKING';
+    RETURN;
+  END IF;
+
+  IF v_consent.status != 'awaiting' THEN
+    RETURN QUERY SELECT FALSE, v_booking.status, 'ALREADY_RESPONDED';
+    RETURN;
+  END IF;
+
+  UPDATE ride_consents
+  SET status = CASE WHEN p_agree THEN 'agreed' ELSE 'declined' END,
+      responded_at = now()
+  WHERE id = v_consent.id;
+
+  IF NOT p_agree THEN
+    UPDATE ride_bookings SET status = 'cancelled' WHERE id = p_booking_id;
+    UPDATE rides SET available_seats = available_seats + v_booking.seats_requested WHERE id = v_booking.ride_id;
+    UPDATE ride_consents SET status = 'declined', responded_at = now()
+      WHERE booking_id = p_booking_id AND status = 'awaiting';
+
+    INSERT INTO notifications (user_id, kind, title, body, ride_id, booking_id)
+    VALUES (
+      v_booking.passenger_id,
+      'consent_resolved',
+      'Your request was answered',
+      'The group finished voting on your join request.',
+      v_booking.ride_id,
+      p_booking_id
+    );
+
+    RETURN QUERY SELECT TRUE, 'cancelled', 'DECLINED';
+    RETURN;
+  END IF;
+
+  SELECT
+    COUNT(*) FILTER (WHERE status = 'awaiting'),
+    COUNT(*) FILTER (WHERE status = 'declined')
+  INTO v_awaiting_count, v_declined_count
+  FROM ride_consents
+  WHERE booking_id = p_booking_id;
+
+  IF v_declined_count > 0 THEN
+    -- Reached when a later "agree" arrives after someone else already
+    -- declined — the booking and seat were already resolved in that
+    -- decline's own branch above (or on a prior call to this one), so
+    -- there's nothing left to update except guarding against sending
+    -- the joiner a second "answered" notice for the same booking.
+    INSERT INTO notifications (user_id, kind, title, body, ride_id, booking_id)
+    SELECT v_booking.passenger_id, 'consent_resolved', 'Your request was answered',
+           'The group finished voting on your join request.', v_booking.ride_id, p_booking_id
+    WHERE NOT EXISTS (
+      SELECT 1 FROM notifications
+      WHERE booking_id = p_booking_id AND kind = 'consent_resolved'
+    );
+
+    RETURN QUERY SELECT TRUE, 'cancelled', 'DECLINED';
+    RETURN;
+  END IF;
+
+  IF v_awaiting_count = 0 THEN
+    UPDATE ride_bookings SET status = 'accepted' WHERE id = p_booking_id;
+
+    INSERT INTO notifications (user_id, kind, title, body, ride_id, booking_id)
+    VALUES (
+      v_booking.passenger_id,
+      'consent_resolved',
+      'Your request was answered',
+      'The group finished voting on your join request.',
+      v_booking.ride_id,
+      p_booking_id
+    );
+
+    RETURN QUERY SELECT TRUE, 'accepted', 'ALL_AGREED';
+    RETURN;
+  END IF;
+
+  RETURN QUERY SELECT TRUE, 'pending_consent', 'AWAITING_OTHERS';
+END;
+$$;
+
+-- ─────────────────────────────────────────────────────────────
+-- expire_stale_consent_bookings(): identical to
+-- 20260905000000_consent_expiry.sql, plus a "your request expired"
+-- notice for each swept booking's original joiner.
+-- ─────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION expire_stale_consent_bookings()
+RETURNS TABLE (booking_id UUID)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_row RECORD;
+BEGIN
+  FOR v_row IN
+    SELECT id, ride_id, seats_requested, passenger_id
+    FROM ride_bookings
+    WHERE status = 'pending_consent'
+      AND expires_at IS NOT NULL
+      AND expires_at < now()
+    FOR UPDATE
+  LOOP
+    UPDATE ride_bookings SET status = 'cancelled' WHERE id = v_row.id;
+    UPDATE rides SET available_seats = available_seats + v_row.seats_requested WHERE id = v_row.ride_id;
+    -- Table alias required — see comment on the same pattern above.
+    UPDATE ride_consents rc SET status = 'expired', responded_at = now()
+      WHERE rc.booking_id = v_row.id AND rc.status = 'awaiting';
+
+    INSERT INTO notifications (user_id, kind, title, body, ride_id, booking_id)
+    VALUES (
+      v_row.passenger_id,
+      'consent_expired',
+      'Join request expired',
+      'Nobody finished voting in time, so your request to join was automatically cancelled.',
+      v_row.ride_id,
+      v_row.id
+    );
+
+    booking_id := v_row.id;
+    RETURN NEXT;
+  END LOOP;
+END;
+$$;
+
+revoke all on function public.expire_stale_consent_bookings() from public;
+grant execute on function public.expire_stale_consent_bookings() to authenticated, service_role;
+alter function public.expire_stale_consent_bookings()
+  security definer
+  set search_path = public;
+
+-- ─────────────────────────────────────────────────────────────
+-- notify_near_expiry_consents(): a "5 minutes left" reminder to
+-- anyone still 'awaiting' on a booking within its final 5 minutes.
+-- nudged_at guarantees at most one reminder per booking, no matter
+-- how often this is called (lazily from the API or via pg_cron).
+-- ─────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION notify_near_expiry_consents()
+RETURNS TABLE (booking_id UUID)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_row RECORD;
+  v_joiner_name TEXT;
+BEGIN
+  FOR v_row IN
+    SELECT id, ride_id, passenger_id
+    FROM ride_bookings
+    WHERE status = 'pending_consent'
+      AND expires_at IS NOT NULL
+      AND nudged_at IS NULL
+      AND expires_at > now()
+      AND expires_at <= now() + interval '5 minutes'
+    FOR UPDATE
+  LOOP
+    SELECT display_name INTO v_joiner_name FROM users WHERE id = v_row.passenger_id;
+    v_joiner_name := COALESCE(v_joiner_name, 'A rider');
+
+    -- Table alias required — see comment on the same pattern above.
+    INSERT INTO notifications (user_id, kind, title, body, ride_id, booking_id)
+    SELECT rc.rider_id, 'consent_reminder', '5 minutes left to respond',
+           v_joiner_name || '''s join request expires soon — vote now or the seat will be released.',
+           v_row.ride_id, v_row.id
+    FROM ride_consents rc
+    WHERE rc.booking_id = v_row.id AND rc.status = 'awaiting';
+
+    UPDATE ride_bookings SET nudged_at = now() WHERE id = v_row.id;
+
+    booking_id := v_row.id;
+    RETURN NEXT;
+  END LOOP;
+END;
+$$;
+
+revoke all on function public.notify_near_expiry_consents() from public;
+grant execute on function public.notify_near_expiry_consents() to authenticated, service_role;
+alter function public.notify_near_expiry_consents()
+  security definer
+  set search_path = public;
+
+-- ─────────────────────────────────────────────────────────────
+-- Mark-as-read, scoped to the caller's own notifications only.
+-- ─────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION mark_notification_read(p_notification_id UUID, p_user_id UUID)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_updated INT;
+BEGIN
+  UPDATE notifications
+  SET read_at = now()
+  WHERE id = p_notification_id AND user_id = p_user_id AND read_at IS NULL;
+  GET DIAGNOSTICS v_updated = ROW_COUNT;
+  RETURN v_updated > 0;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION mark_all_notifications_read(p_user_id UUID)
+RETURNS INT
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_updated INT;
+BEGIN
+  UPDATE notifications
+  SET read_at = now()
+  WHERE user_id = p_user_id AND read_at IS NULL;
+  GET DIAGNOSTICS v_updated = ROW_COUNT;
+  RETURN v_updated;
+END;
+$$;
+
+revoke all on function public.mark_notification_read(uuid, uuid) from public;
+grant execute on function public.mark_notification_read(uuid, uuid) to authenticated, service_role;
+alter function public.mark_notification_read(uuid, uuid)
+  security definer
+  set search_path = public;
+
+revoke all on function public.mark_all_notifications_read(uuid) from public;
+grant execute on function public.mark_all_notifications_read(uuid) to authenticated, service_role;
+alter function public.mark_all_notifications_read(uuid)
+  security definer
+  set search_path = public;
+
+revoke all on function public.book_pooled_ride(
+  uuid, uuid, numeric, numeric, text, numeric, numeric, text, int, int
+) from public;
+grant execute on function public.book_pooled_ride(
+  uuid, uuid, numeric, numeric, text, numeric, numeric, text, int, int
+) to authenticated;
+alter function public.book_pooled_ride(
+  uuid, uuid, numeric, numeric, text, numeric, numeric, text, int, int
+) security definer
+set search_path = public;
+
+revoke all on function public.respond_to_ride_consent(uuid, uuid, boolean) from public;
+grant execute on function public.respond_to_ride_consent(uuid, uuid, boolean) to authenticated;
+alter function public.respond_to_ride_consent(uuid, uuid, boolean)
+  security definer
+  set search_path = public;
+
+-- Best-effort proactive sweep alongside the existing expiry job (see
+-- 20260905000000_consent_expiry.sql) — same pg_cron guard, same
+-- graceful no-op if the extension isn't available on this project.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
+    PERFORM cron.unschedule('notify-near-expiry-consents')
+    WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'notify-near-expiry-consents');
+
+    PERFORM cron.schedule(
+      'notify-near-expiry-consents',
+      '* * * * *',
+      $sql$SELECT public.notify_near_expiry_consents();$sql$
+    );
+  END IF;
+EXCEPTION WHEN OTHERS THEN
+  NULL;
+END $$;
+
+
+-- ========================================================
+-- Migration: 20260907000000_ride_hailing_fare.sql
+-- ========================================================
+
+-- ─────────────────────────────────────────────────────────────
+-- Day 11 — Shared ride-hailing (Yango/inDrive/Careem) fare splitting.
+--
+-- PROBLEM: vehicle_type only distinguished "none" (classic peer-to-peer)
+-- from "car"/"bike" (one side owns a vehicle, rides free, the other pays
+-- a computed per-km fare). Neither models a group who books ONE
+-- Yango/inDrive/Careem together and splits its already-fixed fare —
+-- there, nobody in the app owns or drives anything (the driver is
+-- outside the app entirely), so the owner/passenger free-ride economics
+-- don't apply, and the fare isn't something OSRM distance can derive —
+-- it's whatever the ride-hailing app already quoted.
+--
+-- FIX: 'ride_hailing' joins the vehicle_type vocabulary, and
+-- ride_hailing_fare_pkr carries whichever side's quote gets split. See
+-- resolveVehicleRoles()/calculateSharedHailingFareSplit() in
+-- matchPipeline.ts / fareSplit.ts for how the split itself works.
+--
+-- SETTLEMENT NOTE: this only computes and displays the per-person
+-- share — actually paying each other happens outside the app (cash or
+-- a manual transfer), same as everywhere else fares are shown today.
+-- No payment integration is added by this migration.
+-- ─────────────────────────────────────────────────────────────
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_enum
+    WHERE enumlabel = 'ride_hailing' AND enumtypid = 'public.vehicle_type'::regtype
+  ) THEN
+    ALTER TYPE public.vehicle_type ADD VALUE 'ride_hailing';
+  END IF;
+END $$;
+
+alter table public.trip_requests
+  add column if not exists ride_hailing_fare_pkr numeric(10, 2);
+
+comment on column public.trip_requests.ride_hailing_fare_pkr is
+  'Only meaningful when vehicle_type = ride_hailing. The total fare (PKR) this rider already has a quote for from the ride-hailing app, to be split evenly among everyone in the match/pool. If both sides of a match independently entered a quote, the average is used instead (see matchPipeline.ts).';
+
+-- A ride_hailing request without a fare can never actually be split —
+-- enforce it at the data layer too, not just in apiHandler.ts, so a
+-- direct insert (or a future code path that forgets the app-level
+-- check) can't create an unsplitable request either.
+--
+-- NOTE: "ride_hailing_fare_pkr > 0" alone is NOT sufficient here — if
+-- the column is NULL (never entered), "NULL > 0" evaluates to NULL,
+-- and Postgres treats a NULL CHECK result as PASSING, not failing.
+-- Verified by actually inserting a ride_hailing row with no fare
+-- against a real database: it succeeded silently with the naive
+-- version of this constraint. IS NOT NULL must be explicit.
+alter table public.trip_requests
+  drop constraint if exists trip_requests_ride_hailing_fare_required;
+alter table public.trip_requests
+  add constraint trip_requests_ride_hailing_fare_required
+  check (vehicle_type != 'ride_hailing' OR (ride_hailing_fare_pkr IS NOT NULL AND ride_hailing_fare_pkr > 0));
+
+
+-- ========================================================
+-- Migration: 20260908000000_vehicle_declaration.sql
+-- ========================================================
+
+-- ─────────────────────────────────────────────────────────────
+-- Day 12 — Self-attested vehicle details for car/bike owners.
+--
+-- WHAT THIS IS: a car/bike owner can put a CNIC + plate number on
+-- record so a matched rider can visually confirm the car that shows
+-- up is actually theirs.
+--
+-- WHAT THIS IS NOT: document verification. Nobody checks the CNIC
+-- against any government database, nobody checks a license photo,
+-- there's no admin review step. This is intentionally self-reported
+-- only — see the explicit choice made when this was scoped. Any UI
+-- surfacing this data must say "self-declared", never "verified."
+--
+-- CNIC HANDLING: the full CNIC is stored (so it can be meaningfully
+-- required at all — a random string masked to 4 digits with no format
+-- check would be theater), but it is NEVER read back by the API, not
+-- even to its own owner. Every function here that returns declaration
+-- data returns only right(cnic_number, 4) or nothing at all. See
+-- vehicleDeclaration.ts for the same rule enforced in the pure
+-- validation helpers shared with the frontend.
+-- ─────────────────────────────────────────────────────────────
+
+create table if not exists public.driver_vehicle_declarations (
+  user_id uuid primary key references public.users(id) on delete cascade,
+  cnic_number text not null check (cnic_number ~ '^\d{5}-\d{7}-\d{1}$'),
+  vehicle_plate text not null check (char_length(vehicle_plate) between 3 and 15),
+  vehicle_make_model text,
+  declared_at timestamp with time zone not null default now()
+);
+
+comment on table public.driver_vehicle_declarations is
+  'Self-attested only — no document check, no admin review. cnic_number must never be selected directly by application code; use the masked views/functions below.';
+comment on column public.driver_vehicle_declarations.cnic_number is
+  'Full CNIC, stored so it can be required/format-checked, but never returned by any API response — see mask_cnic_last4() and driver_vehicle_declarations_public.';
+
+alter table public.driver_vehicle_declarations enable row level security;
+
+-- Only the owner can see their own row directly (and only via the
+-- backend's masking function in practice, but this is defense in
+-- depth in case of any future direct client access).
+drop policy if exists driver_vehicle_declarations_owner_select on public.driver_vehicle_declarations;
+create policy driver_vehicle_declarations_owner_select
+on public.driver_vehicle_declarations
+for select
+to authenticated
+using (
+  user_id in (select person.id from public.users as person where person.auth_user_id = auth.uid())
+);
+
+revoke all on public.driver_vehicle_declarations from public;
+grant select on public.driver_vehicle_declarations to authenticated;
+
+-- A masked view is what everything else (matched riders, any future
+-- direct client query) should ever read from — CNIC simply isn't a
+-- column here, so there's no way to accidentally select it.
+create or replace view public.driver_vehicle_declarations_public as
+select
+  user_id,
+  vehicle_plate,
+  vehicle_make_model,
+  declared_at
+from public.driver_vehicle_declarations;
+
+grant select on public.driver_vehicle_declarations_public to authenticated;
+
+-- Upsert, called from apiHandler.ts. Returns only the masked view of
+-- what was just saved — never the full CNIC, even in the same
+-- request that submitted it, so there is no code path anywhere that
+-- has to remember not to leak it.
+CREATE OR REPLACE FUNCTION upsert_vehicle_declaration(
+  p_user_id UUID,
+  p_cnic_number TEXT,
+  p_vehicle_plate TEXT,
+  p_vehicle_make_model TEXT
+)
+RETURNS TABLE (
+  vehicle_plate TEXT,
+  vehicle_make_model TEXT,
+  cnic_last4 TEXT,
+  declared_at TIMESTAMPTZ
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  INSERT INTO driver_vehicle_declarations (user_id, cnic_number, vehicle_plate, vehicle_make_model, declared_at)
+  VALUES (p_user_id, p_cnic_number, p_vehicle_plate, p_vehicle_make_model, now())
+  ON CONFLICT (user_id) DO UPDATE
+    SET cnic_number = EXCLUDED.cnic_number,
+        vehicle_plate = EXCLUDED.vehicle_plate,
+        vehicle_make_model = EXCLUDED.vehicle_make_model,
+        declared_at = now();
+
+  RETURN QUERY
+  -- BUG FIX: RIGHT(cnic_number, 4) alone takes the literal last 4
+  -- CHARACTERS of the stored "12345-1234567-1" string — which is
+  -- "67-1", including a dash, NOT the last 4 digits. Verified by
+  -- actually calling this function against a real database before
+  -- the fix. Non-digits must be stripped first.
+  SELECT d.vehicle_plate, d.vehicle_make_model, RIGHT(regexp_replace(d.cnic_number, '[^0-9]', '', 'g'), 4), d.declared_at
+  FROM driver_vehicle_declarations d
+  WHERE d.user_id = p_user_id;
+END;
+$$;
+
+revoke all on function public.upsert_vehicle_declaration(uuid, text, text, text) from public;
+grant execute on function public.upsert_vehicle_declaration(uuid, text, text, text) to authenticated, service_role;
+alter function public.upsert_vehicle_declaration(uuid, text, text, text)
+  security definer
+  set search_path = public;
+
+-- Lets the owner see their OWN masked declaration (e.g. to prefill an
+-- edit form) without ever selecting cnic_number directly.
+CREATE OR REPLACE FUNCTION get_own_vehicle_declaration(p_user_id UUID)
+RETURNS TABLE (
+  vehicle_plate TEXT,
+  vehicle_make_model TEXT,
+  cnic_last4 TEXT,
+  declared_at TIMESTAMPTZ
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RETURN QUERY
+  SELECT d.vehicle_plate, d.vehicle_make_model, RIGHT(regexp_replace(d.cnic_number, '[^0-9]', '', 'g'), 4), d.declared_at
+  FROM driver_vehicle_declarations d
+  WHERE d.user_id = p_user_id;
+END;
+$$;
+
+revoke all on function public.get_own_vehicle_declaration(uuid) from public;
+grant execute on function public.get_own_vehicle_declaration(uuid) to authenticated, service_role;
+alter function public.get_own_vehicle_declaration(uuid)
+  security definer
+  set search_path = public;
+
+
+-- ========================================================
+-- Migration: 20260909000000_overlap_threshold_50.sql
+-- ========================================================
+
+-- Lower the coarse matching floor from 75% to 50% so partially-overlapping
+-- routes (same corridor, different endpoints) still reach the OSRM pipeline.
+-- The Node pipeline (matchPipeline.ts MIN_OVERLAP_PCT) uses the same 50% floor.
+
+create or replace function public.find_matching_trip_requests(
+  p_trip_request_id uuid,
+  p_limit integer default 50
+)
+returns table (
+  candidate_request_id uuid,
+  candidate_user_id uuid,
+  candidate_display_name text,
+  candidate_gender public.gender,
+  candidate_preference text,
+  candidate_departure_at timestamptz,
+  route_overlap_pct numeric,
+  origin_lat numeric,
+  origin_lng numeric,
+  destination_lat numeric,
+  destination_lng numeric
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  with requester as (
+    select
+      request.id,
+      request.user_id,
+      request.origin_lat,
+      request.origin_lng,
+      request.destination_lat,
+      request.destination_lng,
+      request.requested_departure_at,
+      request.window_minutes,
+      request.preference,
+      person.gender
+    from public.trip_requests as request
+    join public.users as person on person.id = request.user_id
+    where request.id = p_trip_request_id
+      and (
+        auth.uid() is null
+        or public.is_trip_request_owner(request.id)
+      )
+      and request.status = 'active'
+      and request.expires_at > timezone('utc', now())
+  ),
+  coarse_candidates as (
+    select
+      candidate_request.id as candidate_request_id,
+      candidate_request.user_id as candidate_user_id,
+      candidate_request.origin_lat as candidate_origin_lat,
+      candidate_request.origin_lng as candidate_origin_lng,
+      candidate_request.destination_lat as candidate_destination_lat,
+      candidate_request.destination_lng as candidate_destination_lng,
+      candidate_request.requested_departure_at as candidate_departure_at,
+      candidate_request.window_minutes as candidate_window_minutes,
+      candidate_request.preference as candidate_preference,
+      candidate_person.display_name as candidate_display_name,
+      candidate_person.gender as candidate_gender,
+      requester.origin_lat as requester_origin_lat,
+      requester.origin_lng as requester_origin_lng,
+      requester.destination_lat as requester_destination_lat,
+      requester.destination_lng as requester_destination_lng
+    from requester
+    join public.trip_requests as candidate_request
+      on candidate_request.id <> requester.id
+     and candidate_request.status = 'active'
+     and candidate_request.expires_at > timezone('utc', now())
+     and public.time_windows_overlap(
+       requester.requested_departure_at,
+       requester.window_minutes,
+       candidate_request.requested_departure_at,
+       candidate_request.window_minutes
+     )
+     and (
+       public.is_within_bounding_box(
+         candidate_request.origin_lat,
+         candidate_request.origin_lng,
+         requester.origin_lat,
+         requester.origin_lng
+       )
+       or public.is_within_bounding_box(
+         candidate_request.destination_lat,
+         candidate_request.destination_lng,
+         requester.destination_lat,
+         requester.destination_lng
+       )
+     )
+    join public.users as candidate_person
+      on candidate_person.id = candidate_request.user_id
+    where public.gender_preference_allows(requester.preference, candidate_person.gender)
+      and public.gender_preference_allows(candidate_request.preference, requester.gender)
+  )
+  select
+    coarse_candidates.candidate_request_id,
+    coarse_candidates.candidate_user_id,
+    coarse_candidates.candidate_display_name,
+    coarse_candidates.candidate_gender,
+    coarse_candidates.candidate_preference,
+    coarse_candidates.candidate_departure_at,
+    route.route_overlap_pct,
+    coarse_candidates.candidate_origin_lat as origin_lat,
+    coarse_candidates.candidate_origin_lng as origin_lng,
+    coarse_candidates.candidate_destination_lat as destination_lat,
+    coarse_candidates.candidate_destination_lng as destination_lng
+  from coarse_candidates
+  cross join lateral (
+    select public.route_overlap_percentage(
+      coarse_candidates.requester_origin_lat,
+      coarse_candidates.requester_origin_lng,
+      coarse_candidates.requester_destination_lat,
+      coarse_candidates.requester_destination_lng,
+      coarse_candidates.candidate_origin_lat,
+      coarse_candidates.candidate_origin_lng,
+      coarse_candidates.candidate_destination_lat,
+      coarse_candidates.candidate_destination_lng
+    ) as route_overlap_pct
+  ) as route
+  where route.route_overlap_pct >= 50
+  order by route.route_overlap_pct desc, coarse_candidates.candidate_departure_at
+  limit greatest(1, least(coalesce(p_limit, 50), 100));
+$$;
+
+
+-- ========================================================
+-- Migration: 20261022000000_safarsync_pooling.sql
+-- ========================================================
+
+-- ─────────────────────────────────────────────────────────────
 -- Migration: SafarSync pooled-ride persistence + live sharing (PHASE 1)
 -- Idempotent: every statement is safe to re-run (IF NOT EXISTS /
 -- CREATE OR REPLACE / drop-then-add constraints).
@@ -2099,9 +3557,9 @@ on conflict (id) do update set contact_name = excluded.contact_name;
 --   7. Enables Supabase Realtime on ride_messages and live_locations.
 --
 -- The book_pooled_ride()/respond_to_ride_consent() DUAL-CONSENT changes
--- are deliberately NOT here вЂ” those are Phase 2. Existing 1:1 / group
+-- are deliberately NOT here — those are Phase 2. Existing 1:1 / group
 -- booking behaviour is left byte-for-byte intact by this file.
--- в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+-- ─────────────────────────────────────────────────────────────
 
 -- 0. Convenience: the public.users.id of the caller behind auth.uid().
 --    Mirrors the alias pattern used across the codebase (a person may be
@@ -2118,39 +3576,6 @@ as $$
   from public.users
   where auth_user_id = auth.uid() or id = auth.uid()
   limit 1;
-$$;
-
--- Is p_user_id a legitimate member of this ride? (driver, primary rider,
--- the ride-hail booker, or an ACCEPTED passenger). Used by RLS below and
--- by the API layer. SECURITY DEFINER so it can read rides/ride_bookings
--- regardless of the caller's own row visibility.
-create or replace function public.is_ride_participant(
-  p_ride_id uuid,
-  p_user_id uuid default public.current_user_id()
-)
-returns boolean
-language sql
-stable
-security definer
-set search_path = public
-as $$
-  select p_user_id is not null and (
-    exists (
-      select 1 from public.rides r
-      where r.id = p_ride_id
-        and (
-          r.driver_id = p_user_id
-          or r.primary_rider_id = p_user_id
-          or r.booked_by = p_user_id
-        )
-    )
-    or exists (
-      select 1 from public.ride_bookings rb
-      where rb.ride_id = p_ride_id
-        and rb.passenger_id = p_user_id
-        and rb.status = 'accepted'
-    )
-  );
 $$;
 
 -- 1. ride_bookings: participant role + a sane seat-count range.
@@ -2194,6 +3619,41 @@ comment on column public.rides.booked_by is
   'In ride_hail_share mode, the user who booked the Uber/Careem/Yango/inDrive cab and therefore sees every joiner''s details. Null for car_pool.';
 comment on column public.rides.ride_mode is
   'car_pool = a personal vehicle; ride_hail_share = a booked app cab being split. Drives joiner-detail redaction in get_ride_participants().';
+
+
+
+-- Is p_user_id a legitimate member of this ride? (driver, primary rider,
+-- the ride-hail booker, or an ACCEPTED passenger). Used by RLS below and
+-- by the API layer. SECURITY DEFINER so it can read rides/ride_bookings
+-- regardless of the caller's own row visibility.
+create or replace function public.is_ride_participant(
+  p_ride_id uuid,
+  p_user_id uuid default public.current_user_id()
+)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select p_user_id is not null and (
+    exists (
+      select 1 from public.rides r
+      where r.id = p_ride_id
+        and (
+          r.driver_id = p_user_id
+          or r.primary_rider_id = p_user_id
+          or r.booked_by = p_user_id
+        )
+    )
+    or exists (
+      select 1 from public.ride_bookings rb
+      where rb.ride_id = p_ride_id
+        and rb.passenger_id = p_user_id
+        and rb.status = 'accepted'
+    )
+  );
+$$;
 
 -- 3. ride_messages: the per-ride group chat channel (keyed by ride_id).
 create table if not exists public.ride_messages (
@@ -2293,12 +3753,12 @@ create table if not exists public.trip_tracking_state (
   primary key (ride_id, user_id)
 );
 
--- в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+-- ─────────────────────────────────────────────────────────────
 -- 6. Row Level Security.
 --    The API server runs as the service role (bypasses RLS); these
 --    policies protect any direct/authenticated access and are what
 --    Supabase Realtime evaluates for a subscriber's own connection.
--- в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+-- ─────────────────────────────────────────────────────────────
 
 -- ride_messages: only accepted members may read or post.
 alter table public.ride_messages enable row level security;
@@ -2406,7 +3866,7 @@ using (
 revoke all on public.match_requests from public;
 grant select on public.match_requests to authenticated;
 
--- в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+-- ─────────────────────────────────────────────────────────────
 -- 7. get_ride_participants(ride_id): the SINGLE authorised way to list a
 --    ride's people, with joiner-detail redaction enforced server-side (we
 --    never rely on client filtering).
@@ -2416,14 +3876,14 @@ grant select on public.match_requests to authenticated;
 --      - car_pool: every member sees everything (they must recognise each
 --        other at the roadside).
 --      - ride_hail_share: only the driver, primary rider, or booked_by (a
---        "host") вЂ” or the joiner themself вЂ” see a joiner's details. Other
+--        "host") — or the joiner themself — see a joiner's details. Other
 --        joiners see a masked "Fellow rider".
 --    Host identities (driver / primary rider) are never masked.
 --
 --    ASSUMPTION (spec gap): public.users has no phone column today, so no
 --    phone is returned; redaction covers name, pickup, dropoff and party
 --    size. If a phone is added later it must flow through this same RPC.
--- в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+-- ─────────────────────────────────────────────────────────────
 create or replace function public.get_ride_participants(
   p_ride_id uuid
 )
@@ -2500,11 +3960,11 @@ grant execute on function public.current_user_id() to authenticated;
 revoke all on function public.is_ride_participant(uuid, uuid) from public;
 grant execute on function public.is_ride_participant(uuid, uuid) to authenticated;
 
--- в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+-- ─────────────────────────────────────────────────────────────
 -- 8. Supabase Realtime for ride_messages and live_locations.
 --    Guarded so it no-ops on any project where the publication is absent
 --    or already contains the table, and never fails the migration.
--- в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+-- ─────────────────────────────────────────────────────────────
 do $$
 begin
   if not exists (select 1 from pg_publication where pubname = 'supabase_realtime') then
@@ -2535,10 +3995,10 @@ begin
 end $$;
 
 
+-- ========================================================
+-- Migration: 20261022000001_safarsync_dual_consent.sql
+-- ========================================================
 
--- ############################################################
--- Aggregated copy of: migrations/20261022000001_safarsync_dual_consent.sql  (SafarSync Phase 2: DUAL consent)
--- ############################################################
 -- ─────────────────────────────────────────────────────────────
 -- Migration: SafarSync DUAL CONSENT (PHASE 2). Idempotent.
 --
@@ -2928,9 +4388,10 @@ alter function public.respond_to_ride_consent(uuid, uuid, boolean)
   security definer set search_path = public;
 
 
--- ############################################################
--- Aggregated copy of: migrations/20261022000002_safarsync_api.sql  (SafarSync Phase 3: API-support)
--- ############################################################
+-- ========================================================
+-- Migration: 20261022000002_safarsync_api.sql
+-- ========================================================
+
 -- ─────────────────────────────────────────────────────────────
 -- Migration: SafarSync API-support (PHASE 3). Idempotent.
 --
@@ -3108,9 +4569,11 @@ $$;
 revoke all on function public.get_ride_participants(uuid, uuid) from public;
 grant execute on function public.get_ride_participants(uuid, uuid) to authenticated;
 
+
 -- ========================================================
 -- Migration: 20261023000000_party_size.sql
 -- ========================================================
+
 -- ─────────────────────────────────────────────────────────────
 -- Migration: Party size ("I am 2 people") + people-count occupancy.
 -- Idempotent: every statement is safe to re-run (IF NOT EXISTS /
@@ -3576,3 +5039,273 @@ $$;
 
 revoke all on function public.get_ride_occupancy(uuid, uuid) from public;
 grant execute on function public.get_ride_occupancy(uuid, uuid) to authenticated;
+
+
+-- ========================================================
+-- Migration: 20261023000001_sos_alerts.sql
+-- ========================================================
+
+-- ─────────────────────────────────────────────────────────────
+-- SOS auto-dispatch audit log.
+--
+-- WHY A SEPARATE TABLE FROM sos_events:
+--   sos_events  = "the rider pressed SOS, here's where they were" (one
+--                 row per trigger — the existing Day 7 audit trail).
+--   sos_alerts  = "for that trigger, here is every recipient we
+--                 prepared an alert for, over which channel, and what
+--                 the delivery status is" (many rows per event).
+--
+-- The status column is deliberately honest about what "sent" means on
+-- a zero-cost web app. A browser cannot silently send SMS/WhatsApp, so
+-- unless a real gateway is wired (see src/sosGateway.ts), a row lands
+-- as 'logged' — the platform recorded and prepared the alert, and the
+-- rider completes the final on-device tap. 'sent' is reserved for a
+-- confirmed hand-off to a configured gateway; 'queued' for a gateway
+-- that accepted but hasn't confirmed; 'failed' for a rejected send.
+-- This is what lets the UI show a truthful per-recipient status rather
+-- than a fake green "Sent to Police".
+-- ─────────────────────────────────────────────────────────────
+
+create table if not exists public.sos_alerts (
+  id uuid primary key default gen_random_uuid(),
+  sos_event_id uuid references public.sos_events(id) on delete set null,
+  user_id uuid not null references public.users(id) on delete cascade,
+
+  recipient_name text not null check (length(trim(recipient_name)) between 1 and 120),
+  -- Nullable: the national police helpline (15) has no E.164 number,
+  -- and an OSM station may be tagged without a phone.
+  recipient_phone text,
+  recipient_kind text not null check (recipient_kind in ('emergency_contact', 'police')),
+  channel text not null check (channel in ('whatsapp', 'sms', 'call', 'log')),
+  status text not null default 'logged'
+    check (status in ('logged', 'sent', 'queued', 'failed')),
+
+  -- The exact auto-composed message + live location link we shared,
+  -- so the rider (and any later review) can see precisely what went out.
+  message text not null,
+  location_link text,
+  lat numeric(9, 6) check (lat between -90 and 90),
+  lng numeric(9, 6) check (lng between -180 and 180),
+
+  created_at timestamptz not null default timezone('utc', now())
+);
+
+create index if not exists sos_alerts_user_idx
+  on public.sos_alerts (user_id, created_at);
+create index if not exists sos_alerts_event_idx
+  on public.sos_alerts (sos_event_id);
+
+-- ─── RLS ────────────────────────────────────────────────────
+-- Same auth_user_id -> users.id mapping as the other safety tables
+-- (20260901000100_sos_safety_tables.sql). Owner can read + insert their
+-- own alert rows only. No UPDATE/DELETE policies: like sos_events this
+-- is an audit trail and must not be silently rewritable by the client.
+
+alter table public.sos_alerts enable row level security;
+
+drop policy if exists sos_alerts_select_own on public.sos_alerts;
+create policy sos_alerts_select_own
+on public.sos_alerts
+for select
+to authenticated
+using (
+  user_id in (
+    select person.id from public.users as person
+    where person.auth_user_id = auth.uid()
+  )
+);
+
+drop policy if exists sos_alerts_insert_own on public.sos_alerts;
+create policy sos_alerts_insert_own
+on public.sos_alerts
+for insert
+to authenticated
+with check (
+  user_id in (
+    select person.id from public.users as person
+    where person.auth_user_id = auth.uid()
+  )
+);
+
+
+-- ========================================================
+-- Base Seed: Initial Users & Test Trips
+-- ========================================================
+
+
+INSERT INTO public.users (id, auth_user_id, display_name, gender, is_verified, verified_domain)
+VALUES
+  ('ebc53584-8f5c-4148-8900-9e8afe056bbe', null, 'Demo Commuter', 'female', true, 'nust.edu.pk'),
+  ('10000000-0000-4000-8000-000000000001', null, 'V1 F-10 Rider', 'male', false, null),
+  ('10000000-0000-4000-8000-000000000002', null, 'V1 G-9 Rider', 'male', true, 'comsats.edu.pk'),
+  ('10000000-0000-4000-8000-000000000003', null, 'V2 F-10 Rider', 'female', true, 'nust.edu.pk'),
+  ('10000000-0000-4000-8000-000000000004', null, 'V2 Saddar Rider', 'female', false, null),
+  ('10000000-0000-4000-8000-000000000005', null, 'V3 F-10 Rider', 'male', false, null),
+  ('10000000-0000-4000-8000-000000000006', null, 'V3 G-9 Female-Only Rider', 'female', true, 'qau.edu.pk')
+ON CONFLICT (id) DO UPDATE SET
+  display_name = EXCLUDED.display_name,
+  gender = EXCLUDED.gender;
+
+INSERT INTO public.trip_requests (
+  id, user_id,
+  origin_lat, origin_lng, origin_address_label,
+  destination_lat, destination_lng, destination_address_label,
+  requested_departure_at, window_minutes, preference, status, expires_at
+) VALUES
+  ('20000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000001', 33.6844, 73.0479, 'F-10 Markaz', 33.6484, 72.9922, 'NUST Gate 1', NOW() + INTERVAL '1 hour', 60, 'any', 'active', NOW() + INTERVAL '10 days'),
+  ('20000000-0000-4000-8000-000000000002', '10000000-0000-4000-8000-000000000002', 33.6880, 73.0250, 'G-9 Markaz', 33.6484, 72.9922, 'NUST Gate 1', NOW() + INTERVAL '1 hour', 60, 'any', 'active', NOW() + INTERVAL '10 days'),
+  ('20000000-0000-4000-8000-000000000003', '10000000-0000-4000-8000-000000000003', 33.6844, 73.0479, 'F-10 Markaz', 33.6484, 72.9922, 'NUST Gate 1', NOW() + INTERVAL '1 hour', 60, 'female_only', 'active', NOW() + INTERVAL '10 days'),
+  ('20000000-0000-4000-8000-000000000006', '10000000-0000-4000-8000-000000000006', 33.6880, 73.0250, 'G-9 Markaz', 33.6484, 72.9922, 'NUST Gate 1', NOW() + INTERVAL '1 hour', 60, 'female_only', 'active', NOW() + INTERVAL '10 days')
+ON CONFLICT (id) DO UPDATE SET
+  status = EXCLUDED.status,
+  expires_at = EXCLUDED.expires_at;
+
+-- ========================================================
+-- Seed: seed_day4.sql
+-- ========================================================
+
+-- Day 4 addition: a male_only preference pair, since the original 6 seed
+-- rows (V1-V3) never exercised 'male_only' — which is exactly the branch
+-- the RLS policy bug in 20260822000002 silently dropped.
+-- Run after supabase/seed.sql.
+
+INSERT INTO public.users (id, display_name, gender, auth_user_id)
+VALUES
+  ('10000000-0000-4000-8000-000000000007', 'V4 F-10 Male-Only Rider', 'male', null),
+  ('10000000-0000-4000-8000-000000000008', 'V4 G-9 Male Rider', 'male', null)
+ON CONFLICT (id) DO UPDATE SET
+  display_name = EXCLUDED.display_name,
+  gender = EXCLUDED.gender;
+
+INSERT INTO public.trip_requests (
+  id, user_id,
+  origin_lat, origin_lng, origin_address_label,
+  destination_lat, destination_lng, destination_address_label,
+  requested_departure_at, window_minutes, preference, status, expires_at
+)
+VALUES
+  (
+    '20000000-0000-4000-8000-000000000007',
+    '10000000-0000-4000-8000-000000000007',
+    33.6844, 73.0479, 'F-10 Markaz',
+    33.6484, 72.9922, 'NUST Gate 1',
+    '2026-08-22 08:05:00+05', 15, 'male_only', 'active',
+    '2099-12-31 23:59:59+05'
+  ),
+  (
+    '20000000-0000-4000-8000-000000000008',
+    '10000000-0000-4000-8000-000000000008',
+    33.6880, 73.0250, 'G-9 Markaz',
+    33.6484, 72.9922, 'NUST Gate 1',
+    '2026-08-22 08:05:00+05', 15, 'any', 'active',
+    '2099-12-31 23:59:59+05'
+  )
+ON CONFLICT (id) DO UPDATE SET
+  origin_lat = EXCLUDED.origin_lat,
+  origin_lng = EXCLUDED.origin_lng,
+  status = EXCLUDED.status;
+
+
+-- ========================================================
+-- Seed: seed_day7.sql
+-- ========================================================
+
+-- Day 7 demo seed. Run AFTER the four 20260901_* migrations and the
+-- original seed.sql (users 10000000-...-0001..0006 must exist).
+-- Idempotent: every statement carries an ON CONFLICT branch.
+
+-- ─── Verified profiles (Feature 3) ──────────────────────────
+-- Real Auth signups earn the badge automatically via POST
+-- /api/verify-student; seeded users have no auth email, so the demo
+-- flips the flag directly for a believable badge/filter showcase.
+update public.users set is_verified = true, verified_domain = 'comsats.edu.pk'
+  where id = '10000000-0000-4000-8000-000000000002';
+update public.users set is_verified = true, verified_domain = 'nust.edu.pk'
+  where id = '10000000-0000-4000-8000-000000000003';
+update public.users set is_verified = true, verified_domain = 'qau.edu.pk'
+  where id = '10000000-0000-4000-8000-000000000006';
+
+-- ─── Completed rides to power the rating flow (Feature 4) ───
+insert into public.rides (
+  id, driver_id,
+  origin_lat, origin_lng, origin_label,
+  destination_lat, destination_lng, destination_label,
+  departure_time, total_seats, available_seats, status
+) values
+  (
+    '30000000-0000-4000-8000-000000000001',
+    '10000000-0000-4000-8000-000000000001',
+    33.6844, 73.0479, 'F-10 Markaz',
+    33.6484, 72.9922, 'NUST Gate 1',
+    '2026-08-30 08:00:00+05', 4, 2, 'completed'
+  ),
+  (
+    '30000000-0000-4000-8000-000000000002',
+    '10000000-0000-4000-8000-000000000005',
+    33.6844, 73.0479, 'F-10 Markaz',
+    33.7007, 73.0578, 'Centaurus Mall',
+    '2026-08-31 18:00:00+05', 4, 3, 'completed'
+  )
+on conflict (id) do update set status = excluded.status;
+
+insert into public.ride_bookings (
+  id, ride_id, passenger_id,
+  pickup_lat, pickup_lng, pickup_label,
+  dropoff_lat, dropoff_lng, dropoff_label,
+  seats_requested, max_co_passengers, status
+) values
+  (
+    '31000000-0000-4000-8000-000000000001',
+    '30000000-0000-4000-8000-000000000001',
+    '10000000-0000-4000-8000-000000000002',
+    33.6880, 73.0250, 'G-9 Markaz',
+    33.6484, 72.9922, 'NUST Gate 1',
+    1, 3, 'completed'
+  ),
+  (
+    '31000000-0000-4000-8000-000000000002',
+    '30000000-0000-4000-8000-000000000001',
+    '10000000-0000-4000-8000-000000000003',
+    33.6844, 73.0479, 'F-10 Markaz',
+    33.6484, 72.9922, 'NUST Gate 1',
+    1, 3, 'completed'
+  ),
+  (
+    '31000000-0000-4000-8000-000000000003',
+    '30000000-0000-4000-8000-000000000002',
+    '10000000-0000-4000-8000-000000000002',
+    33.6844, 73.0479, 'F-10 Markaz',
+    33.7007, 73.0578, 'Centaurus Mall',
+    1, 3, 'completed'
+  )
+on conflict (id) do update set status = excluded.status;
+
+-- ─── Ratings (Feature 4) ────────────────────────────────────
+-- Averages after this seed: user 0001 -> 4.5 (2), 0002 -> 4.5 (2),
+-- 0003 -> 4.0 (1), 0005 -> 5.0 (1). Users 0004/0006 stay unrated so
+-- the "No ratings yet" state is also demonstrable.
+insert into public.ratings (ride_id, rater_id, rated_user_id, stars, comment) values
+  ('30000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000002',
+   '10000000-0000-4000-8000-000000000001', 5, 'On time, smooth driving.'),
+  ('30000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000003',
+   '10000000-0000-4000-8000-000000000001', 4, null),
+  ('30000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000001',
+   '10000000-0000-4000-8000-000000000002', 5, 'Great co-rider, easy pickup.'),
+  ('30000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000001',
+   '10000000-0000-4000-8000-000000000003', 4, null),
+  ('30000000-0000-4000-8000-000000000002', '10000000-0000-4000-8000-000000000005',
+   '10000000-0000-4000-8000-000000000002', 4, null),
+  ('30000000-0000-4000-8000-000000000002', '10000000-0000-4000-8000-000000000002',
+   '10000000-0000-4000-8000-000000000005', 5, 'Very polite.')
+on conflict (ride_id, rater_id, rated_user_id) do update set stars = excluded.stars;
+
+-- ─── One emergency contact for the demo user (Feature 2) ────
+insert into public.emergency_contacts (id, user_id, contact_name, contact_phone)
+values (
+  '32000000-0000-4000-8000-000000000001',
+  '10000000-0000-4000-8000-000000000001',
+  'Ammi',
+  '+923001234567'
+)
+on conflict (id) do update set contact_name = excluded.contact_name;
+

@@ -1,0 +1,14 @@
+{
+  "name": "routesync",
+  "version": "1.0.0",
+  "private": true,
+  "description": "RouteSync - Intelligent Carpooling & Ride-Sharing Platform",
+  "scripts": {
+    "build": "npm --prefix routemate-person-b run build",
+    "build:web": "npm --prefix routemate-person-b run build:web",
+    "dev": "npm --prefix routemate-person-b run dev",
+    "dev:all": "npm --prefix routemate-person-b run dev:all",
+    "start": "npm --prefix routemate-person-b run start",
+    "test": "npm --prefix routemate-person-b test"
+  }
+}

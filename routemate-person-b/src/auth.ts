@@ -23,8 +23,20 @@ declare global {
   }
 }
 
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
+function sanitizeSupabaseUrl(rawUrl?: string): string {
+  if (!rawUrl) return "";
+  let url = rawUrl.trim();
+  url = url.replace(/\/rest\/v1\/?$/, "");
+  url = url.replace(/\/+$/, "");
+  return url;
+}
+
+const rawSupabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+const supabaseUrl = sanitizeSupabaseUrl(rawSupabaseUrl);
+const supabaseAnonKey =
+  process.env.SUPABASE_ANON_KEY ||
+  process.env.VITE_SUPABASE_ANON_KEY ||
+  process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 // The auth-verifying client uses the anon key (not the service-role key) —
 // verifying a JWT doesn't need elevated privileges, and using the anon key

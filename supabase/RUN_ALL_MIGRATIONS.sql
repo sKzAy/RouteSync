@@ -3542,39 +3542,6 @@ as $$
   limit 1;
 $$;
 
--- Is p_user_id a legitimate member of this ride? (driver, primary rider,
--- the ride-hail booker, or an ACCEPTED passenger). Used by RLS below and
--- by the API layer. SECURITY DEFINER so it can read rides/ride_bookings
--- regardless of the caller's own row visibility.
-create or replace function public.is_ride_participant(
-  p_ride_id uuid,
-  p_user_id uuid default public.current_user_id()
-)
-returns boolean
-language sql
-stable
-security definer
-set search_path = public
-as $$
-  select p_user_id is not null and (
-    exists (
-      select 1 from public.rides r
-      where r.id = p_ride_id
-        and (
-          r.driver_id = p_user_id
-          or r.primary_rider_id = p_user_id
-          or r.booked_by = p_user_id
-        )
-    )
-    or exists (
-      select 1 from public.ride_bookings rb
-      where rb.ride_id = p_ride_id
-        and rb.passenger_id = p_user_id
-        and rb.status = 'accepted'
-    )
-  );
-$$;
-
 -- 1. ride_bookings: participant role + a sane seat-count range.
 --    seats_requested already exists (20260825000000_pooling_capacity.sql);
 --    here we only pin its allowed range and add role.
@@ -3616,6 +3583,41 @@ comment on column public.rides.booked_by is
   'In ride_hail_share mode, the user who booked the Uber/Careem/Yango/inDrive cab and therefore sees every joiner''s details. Null for car_pool.';
 comment on column public.rides.ride_mode is
   'car_pool = a personal vehicle; ride_hail_share = a booked app cab being split. Drives joiner-detail redaction in get_ride_participants().';
+
+
+
+-- Is p_user_id a legitimate member of this ride? (driver, primary rider,
+-- the ride-hail booker, or an ACCEPTED passenger). Used by RLS below and
+-- by the API layer. SECURITY DEFINER so it can read rides/ride_bookings
+-- regardless of the caller's own row visibility.
+create or replace function public.is_ride_participant(
+  p_ride_id uuid,
+  p_user_id uuid default public.current_user_id()
+)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select p_user_id is not null and (
+    exists (
+      select 1 from public.rides r
+      where r.id = p_ride_id
+        and (
+          r.driver_id = p_user_id
+          or r.primary_rider_id = p_user_id
+          or r.booked_by = p_user_id
+        )
+    )
+    or exists (
+      select 1 from public.ride_bookings rb
+      where rb.ride_id = p_ride_id
+        and rb.passenger_id = p_user_id
+        and rb.status = 'accepted'
+    )
+  );
+$$;
 
 -- 3. ride_messages: the per-ride group chat channel (keyed by ride_id).
 create table if not exists public.ride_messages (

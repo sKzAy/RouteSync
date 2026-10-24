@@ -77,17 +77,35 @@ import {
   RequestMatchType,
 } from "./frontend/matchrequeststore";
 
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+function sanitizeSupabaseUrl(rawUrl?: string): string {
+  if (!rawUrl) return "";
+  let url = rawUrl.trim();
+  url = url.replace(/\/rest\/v1\/?$/, "");
+  url = url.replace(/\/+$/, "");
+  return url;
+}
 
-if (!supabaseUrl || !supabaseKey) {
-  throw new Error(
-    "[apiHandler] Missing SUPABASE_URL and/or SUPABASE_SERVICE_ROLE_KEY. " +
-      "Copy .env.example to .env and fill in your project's values."
+const rawSupabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+const supabaseUrl = sanitizeSupabaseUrl(rawSupabaseUrl);
+const supabaseKey =
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_ANON_KEY ||
+  process.env.VITE_SUPABASE_ANON_KEY;
+
+export const isDbConfigured = Boolean(supabaseUrl && supabaseKey);
+
+if (!isDbConfigured) {
+  // eslint-disable-next-line no-console
+  console.warn(
+    "[apiHandler] SUPABASE_URL and/or SUPABASE_SERVICE_ROLE_KEY missing. " +
+      "Database endpoints will return an error until configured in environment variables."
   );
 }
 
-const supabase = createClient(supabaseUrl, supabaseKey);
+const supabase = createClient(
+  supabaseUrl || "https://placeholder.supabase.co",
+  supabaseKey || "placeholder-key"
+);
 
 // ─────────────────────────────────────────────────────────────
 // Day 7: DB capability probe. The Day 7 migrations add new tables and
@@ -121,11 +139,40 @@ interface DbCapabilities {
 }
 
 async function probeRelation(select: string, table: string): Promise<boolean> {
-  const { error } = await supabase.from(table).select(select).limit(1);
-  return !error;
+  if (!isDbConfigured) return false;
+  try {
+    const { error } = await supabase.from(table).select(select).limit(1);
+    return !error;
+  } catch {
+    return false;
+  }
 }
 
 async function probeDbCapabilities(): Promise<DbCapabilities> {
+  if (!isDbConfigured) {
+    return {
+      requireDriverGenderMatchCol: false,
+      vehicleTypeCol: false,
+      userVerifiedCols: false,
+      emergencyContactsTable: false,
+      sosEventsTable: false,
+      sosAlertsTable: false,
+      ratingsTable: false,
+      userReportsTable: false,
+      blockedUsersTable: false,
+      ridesTable: false,
+      rideConsentsTable: false,
+      carbonSavingsTable: false,
+      notificationsTable: false,
+      rideHailingFareCol: false,
+      partySizeCol: false,
+      driverVehicleDeclarationsTable: false,
+      rideMessagesTable: false,
+      liveLocationsTable: false,
+      tripTrackingStateTable: false,
+    };
+  }
+
   const [
     requireDriverGenderMatchCol,
     vehicleTypeCol,
