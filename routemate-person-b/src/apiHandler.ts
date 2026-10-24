@@ -3540,6 +3540,53 @@ async function assertChatAccess(chatId: string, userId: string): Promise<boolean
   } catch {
     /* fallback to local store */
   }
+
+  // Also check if any match request has this chat_id or if chatId belongs to this user
+  try {
+    const { data: req } = await supabase
+      .from("match_requests")
+      .select("id, from_user_id, to_user_id, from_name, to_name, chat_id, snapshot")
+      .or(`chat_id.eq.${chatId},id.eq.${chatId}`)
+      .maybeSingle();
+    if (req) {
+      const isParty = aliases.includes(req.from_user_id) || aliases.includes(req.to_user_id);
+      if (isParty) {
+        upsertMatchChat({
+          myUserId: req.from_user_id,
+          myDisplayName: req.from_name,
+          peerUserId: req.to_user_id,
+          peerDisplayName: req.to_name,
+          originLabel: req.snapshot?.origin_label || "Pickup",
+          destinationLabel: req.snapshot?.destination_label || "Drop-off",
+          fareSharePkr: req.snapshot?.fare_share_from_pkr || 0,
+        });
+        return true;
+      }
+    }
+  } catch {
+    /* fallback */
+  }
+
+  // Fallback: If chatId starts with chat_ and has user ID or aliases, reconstruct on the fly
+  if (chatId.startsWith("chat_")) {
+    const userClean = userId.replace(/[^a-zA-Z0-9]/g, "_");
+    const anyAlias = aliases.some((a) => chatId.includes(a.replace(/[^a-zA-Z0-9]/g, "_")));
+    if (chatId.includes(userClean) || anyAlias) {
+      syncThread({
+        id: chatId,
+        participantIds: [userId],
+        participantNames: { [userId]: "You" },
+        originLabel: "Pickup",
+        destinationLabel: "Drop-off",
+        fareSharePkr: 0,
+        rideId: null,
+        createdAt: new Date().toISOString(),
+        messages: [],
+      });
+      return true;
+    }
+  }
+
   return false;
 }
 
