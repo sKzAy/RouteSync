@@ -97,7 +97,13 @@ export default function MatchChatDrawer({
           timestamp: formatTime(m.created_at),
         })
       );
-      setMessages(next);
+      setMessages((prev) => {
+        const serverTexts = new Set(next.map((m) => m.text));
+        const pendingOptimistic = prev.filter(
+          (m) => m.id.startsWith("local_") && !serverTexts.has(m.text)
+        );
+        return [...next, ...pendingOptimistic];
+      });
       setLoadError(null);
     } catch {
       if (!opts?.quiet) {

@@ -268,6 +268,25 @@ export function hasConfirmedRequestBetween(a: string[], b: string[]): boolean {
   return false;
 }
 
+/** Check if there is an active (pending, awaiting, confirmed) request between pairs */
+export function hasOpenOrConfirmedRequestBetween(a: string[], b: string[]): boolean {
+  expireStaleMatchRequests();
+  for (const r of requestsById.values()) {
+    if (
+      (r.status === "pending" || r.status === "awaiting_requester" || r.status === "confirmed") &&
+      pairMatches(r, a, b)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function syncMatchRequest(req: MatchRequest): void {
+  requestsById.set(req.id, req);
+  touches(req);
+}
+
 export function respondToRequest(
   id: string,
   decision: "accept" | "decline",

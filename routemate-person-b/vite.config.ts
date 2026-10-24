@@ -16,7 +16,6 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [react()],
-    envPrefix: ["VITE_", "NEXT_PUBLIC_", "SUPABASE_"],
     // NOTE: tsc (npm run build) already outputs the backend/test bundle to
     // ./dist. Vite defaulted to the same folder, so `vite build` was silently
     // deleting dist/test.js, dist/test_day4.js, dist/test_pooling.js, etc.

@@ -221,3 +221,23 @@ export function grantChatAccessIfAlias(
   persist();
   return true;
 }
+
+export function syncThread(thread: MatchChatThread): void {
+  threadsById.set(thread.id, thread);
+  if (thread.participantIds.length >= 2) {
+    const key = pairKey(thread.participantIds[0], thread.participantIds[1]);
+    threadsByPair.set(key, thread.id);
+  }
+  if (thread.groupId) {
+    threadsByGroup.set(thread.groupId, thread.id);
+  }
+}
+
+export function syncMessage(threadId: string, msg: StoredChatMessage): void {
+  const thread = threadsById.get(threadId);
+  if (!thread) return;
+  if (!thread.messages.some((m) => m.id === msg.id)) {
+    thread.messages.push(msg);
+    thread.messages.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+}

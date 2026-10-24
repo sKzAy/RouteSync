@@ -612,27 +612,50 @@ export default function MatchCard({
           </button>
         </div>
       ) : requestStatus ? (
-        <div
-          style={{
-            fontFamily: "var(--rm-font-body)",
-            fontSize: "12px",
-            color: "var(--rm-ink)",
-            background: "var(--rm-paper)",
-            border: "1px dashed var(--rm-border)",
-            borderRadius: "8px",
-            padding: "10px 12px",
-            display: "flex",
-            alignItems: "center",
-            gap: "8px",
-          }}
-        >
-          {requestStatus === "pending" ? (
-            <>
-              ⏳ {group ? "Join request sent" : "Request sent"} — waiting for{" "}
-              {group ? `${hostName}'s group` : candidateDisplayName} to respond
-            </>
-          ) : (
-            <>✅ {candidateDisplayName} accepted — confirm in your ride requests</>
+        <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+          <div
+            style={{
+              fontFamily: "var(--rm-font-body)",
+              fontSize: "12px",
+              color: "var(--rm-ink)",
+              background: "var(--rm-paper)",
+              border: "1px dashed var(--rm-border)",
+              borderRadius: "8px",
+              padding: "10px 12px",
+              display: "flex",
+              alignItems: "center",
+              gap: "8px",
+            }}
+          >
+            {requestStatus === "pending" ? (
+              <>
+                ⏳ {group ? "Join request sent" : "Request sent"} — waiting for{" "}
+                {group ? `${hostName}'s group` : candidateDisplayName} to respond
+              </>
+            ) : (
+              <>✅ {candidateDisplayName} accepted — confirm in your ride requests</>
+            )}
+          </div>
+          {onOpenChat && (
+            <button
+              onClick={onOpenChat}
+              style={{
+                width: "100%",
+                padding: "9px",
+                fontFamily: "var(--rm-font-display)",
+                fontSize: "12px",
+                fontWeight: 600,
+                letterSpacing: "0.03em",
+                textTransform: "uppercase",
+                color: "var(--rm-signal-ink)",
+                background: "var(--rm-signal)",
+                border: "none",
+                borderRadius: "var(--rm-radius)",
+                cursor: "pointer",
+              }}
+            >
+              💬 Open Chat with {candidateDisplayName}
+            </button>
           )}
         </div>
       ) : (

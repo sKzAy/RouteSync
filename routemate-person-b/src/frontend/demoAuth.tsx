@@ -11,20 +11,8 @@ import { Gender } from "../types";
 import { UserRole } from "./LocationSearchForm";
 import { API_URL } from "./apiBase";
 
-const env = (import.meta as any).env ?? {};
-const SUPABASE_URL: string =
-  env.VITE_SUPABASE_URL ||
-  env.NEXT_PUBLIC_SUPABASE_URL ||
-  env.SUPABASE_URL ||
-  "https://kmjbbudjhzxigqyhvzjg.supabase.co";
-
-const SUPABASE_ANON_KEY: string =
-  env.VITE_SUPABASE_ANON_KEY ||
-  env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
-  env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
-  env.SUPABASE_ANON_KEY ||
-  env.SUPABASE_PUBLISHABLE_KEY ||
-  "sb_publishable_YELvd6FBMYT1yEbynXi-FA_c9TMwJvp";
+const SUPABASE_URL = (import.meta as any).env?.VITE_SUPABASE_URL ?? "";
+const SUPABASE_ANON_KEY = (import.meta as any).env?.VITE_SUPABASE_ANON_KEY ?? "";
 
 export type IdDocumentType = "university_card" | "office_card";
 
@@ -83,7 +71,7 @@ function getClient() {
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
     throw new Error(
       "VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY are not set — see .env.example. " +
-        "Without these the frontend can't sign in and every auth-protected API call will 401."
+      "Without these the frontend can't sign in and every auth-protected API call will 401."
     );
   }
   if (!client) client = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);

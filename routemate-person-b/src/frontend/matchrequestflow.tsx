@@ -427,9 +427,11 @@ export function SendRequestModal({
 function IncomingPendingCard({
   request,
   onChanged,
+  onOpenChat,
 }: {
   request: MatchRequestView;
   onChanged: () => void;
+  onOpenChat?: (match: any) => void;
 }) {
   const [agrees, setAgrees] = useState(false);
   const [fareAgreed, setFareAgreed] = useState(false);
@@ -503,6 +505,40 @@ function IncomingPendingCard({
           {p.pickup_note && <div>📍 {p.pickup_note}</div>}
           {p.note && <div style={{ marginTop: p.pickup_note ? "4px" : 0 }}>💬 “{p.note}”</div>}
         </div>
+      )}
+
+      {onOpenChat && (
+        <button
+          type="button"
+          onClick={() =>
+            onOpenChat({
+              id: request.chat_id || request.id,
+              chatId: request.chat_id || undefined,
+              candidateDisplayName: request.from_name,
+              candidatePhone: "Use in-app chat",
+              candidateSectorFrom: request.snapshot.origin_label,
+              candidateSectorTo: request.snapshot.destination_label,
+              fareSharePKR: request.snapshot.fare_share_to_pkr,
+            })
+          }
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "6px",
+            padding: "8px 14px",
+            fontFamily: "var(--rm-font-display)",
+            fontSize: "12px",
+            fontWeight: 600,
+            color: "var(--rm-signal-ink)",
+            background: "var(--rm-signal)",
+            border: "none",
+            borderRadius: "var(--rm-radius)",
+            cursor: "pointer",
+            width: "fit-content",
+          }}
+        >
+          💬 Chat with {request.from_name}
+        </button>
       )}
 
       <div style={{ borderTop: "1px solid var(--rm-border)", paddingTop: "10px", display: "flex", flexDirection: "column", gap: "8px" }}>
@@ -603,10 +639,12 @@ export default function MatchRequestsPanel({
   userId,
   onOutgoingChange,
   onConfirmed,
+  onOpenChat,
 }: {
   userId: string;
   onOutgoingChange: (outgoing: MatchRequestView[]) => void;
   onConfirmed: (request: MatchRequestView, chatId: string, rideId?: string | null) => void;
+  onOpenChat?: (match: any) => void;
 }) {
   const [incoming, setIncoming] = useState<MatchRequestView[]>([]);
   const [outgoing, setOutgoing] = useState<MatchRequestView[]>([]);
@@ -627,9 +665,22 @@ export default function MatchRequestsPanel({
       const payload = await res.json();
       const inc = (payload.incoming ?? []) as MatchRequestView[];
       const out = (payload.outgoing ?? []) as MatchRequestView[];
-      setIncoming(inc);
-      setOutgoing(out);
-      onOutgoingChangeRef.current(out);
+      
+      // Preserve active requests if serverless instance transiently returns empty
+      setIncoming((prev) => {
+        if (!inc.length && prev.some((r) => r.status === "pending" || r.status === "awaiting_requester")) {
+          return prev;
+        }
+        return inc;
+      });
+      setOutgoing((prev) => {
+        if (!out.length && prev.some((r) => r.status === "pending" || r.status === "awaiting_requester")) {
+          onOutgoingChangeRef.current(prev);
+          return prev;
+        }
+        onOutgoingChangeRef.current(out);
+        return out;
+      });
     } catch {
       /* poll errors are transient — the next tick retries */
     }
@@ -727,7 +778,7 @@ export default function MatchRequestsPanel({
           <h2 style={sectionTitleStyle}>📥 Ride requests for you</h2>
           {visibleIncoming.map((r) => {
             if (r.status === "pending") {
-              return <IncomingPendingCard key={r.id} request={r} onChanged={refresh} />;
+              return <IncomingPendingCard key={r.id} request={r} onChanged={refresh} onOpenChat={onOpenChat} />;
             }
             if (r.status === "awaiting_requester") {
               return (
@@ -742,6 +793,40 @@ export default function MatchRequestsPanel({
                       {r.conditions.max_co_passengers !== null ? ` · cap ${r.conditions.max_co_passengers}` : ""}
                       {r.conditions.gender_preference !== "any" ? ` · ${GENDER_LABEL[r.conditions.gender_preference]}` : ""}
                       {r.conditions.note ? ` · “${r.conditions.note}”` : ""}
+                    </div>
+                  )}
+                  {onOpenChat && (
+                    <div style={{ marginTop: "6px" }}>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onOpenChat({
+                            id: r.chat_id || r.id,
+                            chatId: r.chat_id || undefined,
+                            candidateDisplayName: r.from_name,
+                            candidatePhone: "Use in-app chat",
+                            candidateSectorFrom: r.snapshot.origin_label,
+                            candidateSectorTo: r.snapshot.destination_label,
+                            fareSharePKR: r.snapshot.fare_share_to_pkr,
+                          })
+                        }
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: "6px",
+                          padding: "6px 12px",
+                          fontFamily: "var(--rm-font-display)",
+                          fontSize: "11px",
+                          fontWeight: 600,
+                          color: "var(--rm-signal-ink)",
+                          background: "var(--rm-signal)",
+                          border: "none",
+                          borderRadius: "6px",
+                          cursor: "pointer",
+                        }}
+                      >
+                        💬 Chat with {r.from_name}
+                      </button>
                     </div>
                   )}
                 </div>
@@ -772,25 +857,56 @@ export default function MatchRequestsPanel({
                     <div style={{ fontSize: "13px", color: "var(--rm-ink)" }}>
                       ⏳ Waiting for <strong>{r.to_name}</strong> to respond · {r.snapshot.origin_label} → {r.snapshot.destination_label}
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => cancelOutgoing(r)}
-                      disabled={busyId !== null}
-                      style={{
-                        padding: "6px 12px",
-                        fontFamily: "var(--rm-font-display)",
-                        fontSize: "11px",
-                        fontWeight: 600,
-                        textTransform: "uppercase",
-                        color: "var(--rm-ink-soft)",
-                        background: "transparent",
-                        border: "1px solid var(--rm-border)",
-                        borderRadius: "8px",
-                        cursor: busyId !== null ? "not-allowed" : "pointer",
-                      }}
-                    >
-                      Cancel
-                    </button>
+                    <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                      {onOpenChat && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onOpenChat({
+                              id: r.chat_id || r.id,
+                              chatId: r.chat_id || undefined,
+                              candidateDisplayName: r.to_name,
+                              candidatePhone: "Use in-app chat",
+                              candidateSectorFrom: r.snapshot.origin_label,
+                              candidateSectorTo: r.snapshot.destination_label,
+                              fareSharePKR: r.snapshot.fare_share_from_pkr,
+                            })
+                          }
+                          style={{
+                            padding: "6px 12px",
+                            fontFamily: "var(--rm-font-display)",
+                            fontSize: "11px",
+                            fontWeight: 600,
+                            color: "var(--rm-signal-ink)",
+                            background: "var(--rm-signal)",
+                            border: "none",
+                            borderRadius: "8px",
+                            cursor: "pointer",
+                          }}
+                        >
+                          💬 Open Chat
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => cancelOutgoing(r)}
+                        disabled={busyId !== null}
+                        style={{
+                          padding: "6px 12px",
+                          fontFamily: "var(--rm-font-display)",
+                          fontSize: "11px",
+                          fontWeight: 600,
+                          textTransform: "uppercase",
+                          color: "var(--rm-ink-soft)",
+                          background: "transparent",
+                          border: "1px solid var(--rm-border)",
+                          borderRadius: "8px",
+                          cursor: busyId !== null ? "not-allowed" : "pointer",
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
                   </div>
                   <PreferenceChips r={r} />
                 </div>
@@ -811,10 +927,42 @@ export default function MatchRequestsPanel({
                       {r.conditions.note && <div>💬 “{r.conditions.note}”</div>}
                     </div>
                   )}
-                  <div style={{ display: "flex", gap: "10px" }}>
+                  <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
                     <PrimaryButton disabled={busyId !== null} onClick={() => confirmFinal(r)}>
-                      Confirm & open chat
+                      Confirm & finish
                     </PrimaryButton>
+                    {onOpenChat && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onOpenChat({
+                            id: r.chat_id || r.id,
+                            chatId: r.chat_id || undefined,
+                            candidateDisplayName: r.to_name,
+                            candidatePhone: "Use in-app chat",
+                            candidateSectorFrom: r.snapshot.origin_label,
+                            candidateSectorTo: r.snapshot.destination_label,
+                            fareSharePKR: r.snapshot.fare_share_from_pkr,
+                          })
+                        }
+                        style={{
+                          flex: 1,
+                          padding: "10px",
+                          fontFamily: "var(--rm-font-display)",
+                          fontSize: "12px",
+                          fontWeight: 600,
+                          textTransform: "uppercase",
+                          letterSpacing: "0.03em",
+                          color: "var(--rm-ink)",
+                          background: "var(--rm-paper)",
+                          border: "1px solid var(--rm-border)",
+                          borderRadius: "var(--rm-radius)",
+                          cursor: "pointer",
+                        }}
+                      >
+                        💬 Chat first
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => withdraw(r)}

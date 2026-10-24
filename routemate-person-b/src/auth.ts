@@ -31,20 +31,12 @@ function sanitizeSupabaseUrl(rawUrl?: string): string {
   return url;
 }
 
-const rawSupabaseUrl =
-  process.env.SUPABASE_URL ||
-  process.env.VITE_SUPABASE_URL ||
-  process.env.NEXT_PUBLIC_SUPABASE_URL ||
-  "https://kmjbbudjhzxigqyhvzjg.supabase.co";
+const rawSupabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
 const supabaseUrl = sanitizeSupabaseUrl(rawSupabaseUrl);
 const supabaseAnonKey =
   process.env.SUPABASE_ANON_KEY ||
   process.env.VITE_SUPABASE_ANON_KEY ||
-  process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
-  process.env.SUPABASE_PUBLISHABLE_KEY ||
-  process.env.SUPABASE_SERVICE_ROLE_KEY ||
-  "sb_publishable_YELvd6FBMYT1yEbynXi-FA_c9TMwJvp";
+  process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 // The auth-verifying client uses the anon key (not the service-role key) —
 // verifying a JWT doesn't need elevated privileges, and using the anon key
@@ -55,7 +47,7 @@ function getAuthClient(): SupabaseClient {
   if (!supabaseUrl || !supabaseAnonKey) {
     throw new Error(
       "[auth] Missing SUPABASE_URL and/or SUPABASE_ANON_KEY. Both are required " +
-        "to verify user JWTs — see .env.example."
+      "to verify user JWTs — see .env.example."
     );
   }
   if (!authClient) authClient = createClient(supabaseUrl, supabaseAnonKey);

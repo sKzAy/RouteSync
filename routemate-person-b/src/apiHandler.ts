@@ -41,6 +41,8 @@ import {
   addMatchChatMessage,
   userCanAccessChat,
   grantChatAccessIfAlias,
+  syncThread,
+  syncMessage,
 } from "./chatStore";
 import {
   upsertIdentityProfile,
@@ -55,6 +57,8 @@ import {
   getMatchRequest,
   findOpenRequestBetween,
   hasConfirmedRequestBetween,
+  hasOpenOrConfirmedRequestBetween,
+  syncMatchRequest,
   respondToRequest,
   finalizeRequest,
   cancelRequest,
@@ -85,20 +89,12 @@ function sanitizeSupabaseUrl(rawUrl?: string): string {
   return url;
 }
 
-const rawSupabaseUrl =
-  process.env.SUPABASE_URL ||
-  process.env.VITE_SUPABASE_URL ||
-  process.env.NEXT_PUBLIC_SUPABASE_URL ||
-  "https://kmjbbudjhzxigqyhvzjg.supabase.co";
+const rawSupabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
 const supabaseUrl = sanitizeSupabaseUrl(rawSupabaseUrl);
 const supabaseKey =
   process.env.SUPABASE_SERVICE_ROLE_KEY ||
   process.env.SUPABASE_ANON_KEY ||
-  process.env.VITE_SUPABASE_ANON_KEY ||
-  process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
-  process.env.SUPABASE_PUBLISHABLE_KEY ||
-  "sb_publishable_YELvd6FBMYT1yEbynXi-FA_c9TMwJvp";
+  process.env.VITE_SUPABASE_ANON_KEY;
 
 export const isDbConfigured = Boolean(supabaseUrl && supabaseKey);
 
@@ -106,7 +102,7 @@ if (!isDbConfigured) {
   // eslint-disable-next-line no-console
   console.warn(
     "[apiHandler] SUPABASE_URL and/or SUPABASE_SERVICE_ROLE_KEY missing. " +
-      "Database endpoints will return an error until configured in environment variables."
+    "Database endpoints will return an error until configured in environment variables."
   );
 }
 
@@ -391,130 +387,130 @@ matchesRouter.post(
   requireAuth,
   requireBodyFieldMatchesAuth("user_id"),
   async (req: Request, res: Response) => {
-  const {
-    origin,
-    destination,
-    requested_departure_at,
-    window_minutes,
-    preference,
-    require_driver_gender_match,
-    vehicle_type,
-    party_size,
-  } = req.body;
+    const {
+      origin,
+      destination,
+      requested_departure_at,
+      window_minutes,
+      preference,
+      require_driver_gender_match,
+      vehicle_type,
+      party_size,
+    } = req.body;
 
-  // Identity comes from the verified JWT. Resolve the public.users row
-  // (id may equal auth.uid(), or be linked via auth_user_id).
-  const authUserId = req.auth!.userId;
+    // Identity comes from the verified JWT. Resolve the public.users row
+    // (id may equal auth.uid(), or be linked via auth_user_id).
+    const authUserId = req.auth!.userId;
 
-  if (!origin?.lat || !origin?.lng || !destination?.lat || !destination?.lng) {
-    return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
-  }
-  if (vehicle_type !== undefined && !["none", "car", "bike", "ride_hailing"].includes(vehicle_type)) {
-    return res.status(400).json({ error: "INVALID_VEHICLE_TYPE" });
-  }
-  const { ride_hailing_fare_pkr } = req.body;
-  if (vehicle_type === "ride_hailing" && (typeof ride_hailing_fare_pkr !== "number" || !(ride_hailing_fare_pkr > 0))) {
-    return res.status(400).json({ error: "RIDE_HAILING_FARE_REQUIRED" });
-  }
+    if (!origin?.lat || !origin?.lng || !destination?.lat || !destination?.lng) {
+      return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
+    }
+    if (vehicle_type !== undefined && !["none", "car", "bike", "ride_hailing"].includes(vehicle_type)) {
+      return res.status(400).json({ error: "INVALID_VEHICLE_TYPE" });
+    }
+    const { ride_hailing_fare_pkr } = req.body;
+    if (vehicle_type === "ride_hailing" && (typeof ride_hailing_fare_pkr !== "number" || !(ride_hailing_fare_pkr > 0))) {
+      return res.status(400).json({ error: "RIDE_HAILING_FARE_REQUIRED" });
+    }
 
-  const caps = await getDbCapabilities();
-  const wantsDriverGenderMatch = require_driver_gender_match === true;
-  if (wantsDriverGenderMatch && !caps.requireDriverGenderMatchCol) {
-    return migrationPending(res, "The 'require driver gender match' safety option");
-  }
-  const hasVehicleType = typeof vehicle_type === "string";
-  const wantsVehicleType = hasVehicleType && vehicle_type !== "none";
-  if (wantsVehicleType && !caps.vehicleTypeCol) {
-    return migrationPending(res, "The 'I have a car/bike' vehicle option");
-  }
-  if (vehicle_type === "ride_hailing" && !caps.rideHailingFareCol) {
-    return migrationPending(res, "The shared Yango/inDrive/Careem fare-split option");
-  }
-  // "I am 2 people": a party is ONE trip request with party_size people
-  // travelling together (lead included), 1..4. Never one request per person.
-  const partySize = party_size ?? 1;
-  if (!Number.isInteger(partySize) || partySize < 1 || partySize > 4) {
-    return res.status(400).json({ error: "INVALID_PARTY_SIZE" });
-  }
-  if (partySize > 1 && !caps.partySizeCol) {
-    return migrationPending(res, "The 'I am 2 people' party-size option");
-  }
+    const caps = await getDbCapabilities();
+    const wantsDriverGenderMatch = require_driver_gender_match === true;
+    if (wantsDriverGenderMatch && !caps.requireDriverGenderMatchCol) {
+      return migrationPending(res, "The 'require driver gender match' safety option");
+    }
+    const hasVehicleType = typeof vehicle_type === "string";
+    const wantsVehicleType = hasVehicleType && vehicle_type !== "none";
+    if (wantsVehicleType && !caps.vehicleTypeCol) {
+      return migrationPending(res, "The 'I have a car/bike' vehicle option");
+    }
+    if (vehicle_type === "ride_hailing" && !caps.rideHailingFareCol) {
+      return migrationPending(res, "The shared Yango/inDrive/Careem fare-split option");
+    }
+    // "I am 2 people": a party is ONE trip request with party_size people
+    // travelling together (lead included), 1..4. Never one request per person.
+    const partySize = party_size ?? 1;
+    if (!Number.isInteger(partySize) || partySize < 1 || partySize > 4) {
+      return res.status(400).json({ error: "INVALID_PARTY_SIZE" });
+    }
+    if (partySize > 1 && !caps.partySizeCol) {
+      return migrationPending(res, "The 'I am 2 people' party-size option");
+    }
 
-  // Prefer the profile linked to this auth user; create one if signup
-  // never managed to write the public.users row (RLS / race).
-  let appUserId: string | null = null;
-  {
-    const { data: byId } = await supabase
-      .from("users")
-      .select("id")
-      .eq("id", authUserId)
-      .maybeSingle();
-    if (byId?.id) {
-      appUserId = byId.id;
-    } else {
-      const { data: byAuth } = await supabase
+    // Prefer the profile linked to this auth user; create one if signup
+    // never managed to write the public.users row (RLS / race).
+    let appUserId: string | null = null;
+    {
+      const { data: byId } = await supabase
         .from("users")
         .select("id")
-        .eq("auth_user_id", authUserId)
+        .eq("id", authUserId)
         .maybeSingle();
-      if (byAuth?.id) {
-        appUserId = byAuth.id;
+      if (byId?.id) {
+        appUserId = byId.id;
+      } else {
+        const { data: byAuth } = await supabase
+          .from("users")
+          .select("id")
+          .eq("auth_user_id", authUserId)
+          .maybeSingle();
+        if (byAuth?.id) {
+          appUserId = byAuth.id;
+        }
       }
     }
-  }
-  if (!appUserId) {
-    const { error: profileErr } = await supabase.from("users").insert({
-      id: authUserId,
-      auth_user_id: authUserId,
-      display_name: "RouteSync User",
-      gender: "female",
-    });
-    if (profileErr) {
-      return res.status(500).json({
-        error: "USER_PROFILE_MISSING",
-        details: profileErr.message,
+    if (!appUserId) {
+      const { error: profileErr } = await supabase.from("users").insert({
+        id: authUserId,
+        auth_user_id: authUserId,
+        display_name: "RouteSync User",
+        gender: "female",
       });
+      if (profileErr) {
+        return res.status(500).json({
+          error: "USER_PROFILE_MISSING",
+          details: profileErr.message,
+        });
+      }
+      appUserId = authUserId;
     }
-    appUserId = authUserId;
-  }
 
-  // Keep a single active request per user so re-searches replace the old
-  // posting instead of leaving stale candidates that confuse matching.
-  await supabase
-    .from("trip_requests")
-    .update({ status: "cancelled" })
-    .eq("user_id", appUserId)
-    .eq("status", "active");
+    // Keep a single active request per user so re-searches replace the old
+    // posting instead of leaving stale candidates that confuse matching.
+    await supabase
+      .from("trip_requests")
+      .update({ status: "cancelled" })
+      .eq("user_id", appUserId)
+      .eq("status", "active");
 
-  const insertRow: Record<string, any> = {
-    user_id: appUserId,
-    origin_lat: origin.lat,
-    origin_lng: origin.lng,
-    origin_address_label: origin.address_label ?? "Unnamed origin",
-    destination_lat: destination.lat,
-    destination_lng: destination.lng,
-    destination_address_label: destination.address_label ?? "Unnamed destination",
-    requested_departure_at: requested_departure_at ?? new Date().toISOString(),
-    window_minutes: window_minutes ?? 60,
-    preference: preference ?? "any",
-    status: "active",
-    expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-  };
-  // Only ever send Day 7/8 columns when they're actually used — requests
-  // that don't touch these flags keep working even on pre-migration DBs.
-  if (wantsDriverGenderMatch) insertRow.require_driver_gender_match = true;
-  if (caps.vehicleTypeCol && hasVehicleType) insertRow.vehicle_type = vehicle_type;
-  if (vehicle_type === "ride_hailing") insertRow.ride_hailing_fare_pkr = ride_hailing_fare_pkr;
-  if (caps.partySizeCol && partySize > 1) insertRow.party_size = partySize;
+    const insertRow: Record<string, any> = {
+      user_id: appUserId,
+      origin_lat: origin.lat,
+      origin_lng: origin.lng,
+      origin_address_label: origin.address_label ?? "Unnamed origin",
+      destination_lat: destination.lat,
+      destination_lng: destination.lng,
+      destination_address_label: destination.address_label ?? "Unnamed destination",
+      requested_departure_at: requested_departure_at ?? new Date().toISOString(),
+      window_minutes: window_minutes ?? 60,
+      preference: preference ?? "any",
+      status: "active",
+      expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    };
+    // Only ever send Day 7/8 columns when they're actually used — requests
+    // that don't touch these flags keep working even on pre-migration DBs.
+    if (wantsDriverGenderMatch) insertRow.require_driver_gender_match = true;
+    if (caps.vehicleTypeCol && hasVehicleType) insertRow.vehicle_type = vehicle_type;
+    if (vehicle_type === "ride_hailing") insertRow.ride_hailing_fare_pkr = ride_hailing_fare_pkr;
+    if (caps.partySizeCol && partySize > 1) insertRow.party_size = partySize;
 
-  const { data, error } = await supabase.from("trip_requests").insert(insertRow).select().single();
+    const { data, error } = await supabase.from("trip_requests").insert(insertRow).select().single();
 
-  if (error || !data) {
-    return res.status(500).json({ error: "TRIP_REQUEST_CREATE_FAILED", details: error?.message });
-  }
+    if (error || !data) {
+      return res.status(500).json({ error: "TRIP_REQUEST_CREATE_FAILED", details: error?.message });
+    }
 
-  return res.status(201).json({ trip_request_id: data.id });
-});
+    return res.status(201).json({ trip_request_id: data.id });
+  });
 
 matchesRouter.get("/api/trip-requests/:id/matches", async (req: Request, res: Response) => {
   const tripRequestId = req.params.id;
@@ -759,16 +755,16 @@ matchesRouter.get("/api/trip-requests/:id/matches", async (req: Request, res: Re
       // one unified card (driver + co-riders) instead of lone profiles.
       group:
         (result.match_type === "owner_passenger" || result.match_type === "shared_ride_hailing") &&
-        result.owner_user_id === candidateReq.user_id
+          result.owner_user_id === candidateReq.user_id
           ? {
-              host_user_id: candidateReq.user_id,
-              host_display_name: candidateReq.user_name,
-              host_trip_request_id: candidateReq.request_id,
-              members: listConfirmedGroupMembers(candidateReq.user_id, candidateReq.request_id).map(
-                (m): GroupMemberView => ({ user_id: m.userId, display_name: m.displayName })
-              ),
-              pending_members: [] as GroupMemberView[],
-            }
+            host_user_id: candidateReq.user_id,
+            host_display_name: candidateReq.user_name,
+            host_trip_request_id: candidateReq.request_id,
+            members: listConfirmedGroupMembers(candidateReq.user_id, candidateReq.request_id).map(
+              (m): GroupMemberView => ({ user_id: m.userId, display_name: m.displayName })
+            ),
+            pending_members: [] as GroupMemberView[],
+          }
           : null,
       legs: result.legs,
       route_geometry: {
@@ -958,64 +954,64 @@ matchesRouter.post(
   requireAuth,
   requireBodyFieldMatchesAuth("user_id"),
   async (req: Request, res: Response) => {
-  const { user_id } = req.body;
-  if (!user_id) return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
+    const { user_id } = req.body;
+    if (!user_id) return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
 
-  const caps = await getDbCapabilities();
-  if (!caps.userVerifiedCols) return migrationPending(res, "Student verification");
+    const caps = await getDbCapabilities();
+    if (!caps.userVerifiedCols) return migrationPending(res, "Student verification");
 
-  const { data: userRow, error } = await supabase
-    .from("users")
-    .select("id, auth_user_id, is_verified, verified_domain")
-    .eq("id", user_id)
-    .single();
+    const { data: userRow, error } = await supabase
+      .from("users")
+      .select("id, auth_user_id, is_verified, verified_domain")
+      .eq("id", user_id)
+      .single();
 
-  if (error || !userRow) return res.status(404).json({ error: "USER_NOT_FOUND" });
+    if (error || !userRow) return res.status(404).json({ error: "USER_NOT_FOUND" });
 
-  if (userRow.is_verified) {
-    return res.json({ is_verified: true, verified_domain: userRow.verified_domain });
-  }
+    if (userRow.is_verified) {
+      return res.json({ is_verified: true, verified_domain: userRow.verified_domain });
+    }
 
-  if (!userRow.auth_user_id) {
-    return res.status(409).json({
-      error: "NO_AUTH_EMAIL",
-      details:
-        "This profile isn't linked to a Supabase Auth account, so there's no email to verify. " +
-        "Sign up with a university email and the badge is granted automatically after confirmation.",
-    });
-  }
+    if (!userRow.auth_user_id) {
+      return res.status(409).json({
+        error: "NO_AUTH_EMAIL",
+        details:
+          "This profile isn't linked to a Supabase Auth account, so there's no email to verify. " +
+          "Sign up with a university email and the badge is granted automatically after confirmation.",
+      });
+    }
 
-  const { data: authUser, error: authError } = await supabase.auth.admin.getUserById(userRow.auth_user_id);
-  if (authError || !authUser?.user?.email) {
-    return res.status(502).json({ error: "AUTH_LOOKUP_FAILED", details: authError?.message });
-  }
+    const { data: authUser, error: authError } = await supabase.auth.admin.getUserById(userRow.auth_user_id);
+    if (authError || !authUser?.user?.email) {
+      return res.status(502).json({ error: "AUTH_LOOKUP_FAILED", details: authError?.message });
+    }
 
-  if (!authUser.user.email_confirmed_at) {
-    return res.status(409).json({
-      error: "EMAIL_NOT_CONFIRMED",
-      details: "Confirm the email Supabase Auth sent you, then try again.",
-    });
-  }
+    if (!authUser.user.email_confirmed_at) {
+      return res.status(409).json({
+        error: "EMAIL_NOT_CONFIRMED",
+        details: "Confirm the email Supabase Auth sent you, then try again.",
+      });
+    }
 
-  const matchedDomain = matchVerifiedDomain(authUser.user.email);
-  if (!matchedDomain) {
-    return res.status(422).json({
-      error: "DOMAIN_NOT_ON_ALLOWLIST",
-      details: "That email domain isn't a recognized Pakistani university/institution domain.",
-    });
-  }
+    const matchedDomain = matchVerifiedDomain(authUser.user.email);
+    if (!matchedDomain) {
+      return res.status(422).json({
+        error: "DOMAIN_NOT_ON_ALLOWLIST",
+        details: "That email domain isn't a recognized Pakistani university/institution domain.",
+      });
+    }
 
-  const { error: updateError } = await supabase
-    .from("users")
-    .update({ is_verified: true, verified_domain: matchedDomain })
-    .eq("id", user_id);
+    const { error: updateError } = await supabase
+      .from("users")
+      .update({ is_verified: true, verified_domain: matchedDomain })
+      .eq("id", user_id);
 
-  if (updateError) {
-    return res.status(500).json({ error: "VERIFICATION_UPDATE_FAILED", details: updateError.message });
-  }
+    if (updateError) {
+      return res.status(500).json({ error: "VERIFICATION_UPDATE_FAILED", details: updateError.message });
+    }
 
-  return res.json({ is_verified: true, verified_domain: matchedDomain });
-});
+    return res.json({ is_verified: true, verified_domain: matchedDomain });
+  });
 
 // ─────────────────────────────────────────────────────────────
 // Day 7 Feature 2: emergency contacts + SOS audit trail.
@@ -1026,87 +1022,87 @@ matchesRouter.get(
   requireAuth,
   requireQueryFieldMatchesAuth("user_id"),
   async (req: Request, res: Response) => {
-  const userId = req.query.user_id as string | undefined;
-  if (!userId) return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
+    const userId = req.query.user_id as string | undefined;
+    if (!userId) return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
 
-  const caps = await getDbCapabilities();
-  if (!caps.emergencyContactsTable) return migrationPending(res, "Emergency contacts");
+    const caps = await getDbCapabilities();
+    if (!caps.emergencyContactsTable) return migrationPending(res, "Emergency contacts");
 
-  const { data, error } = await supabase
-    .from("emergency_contacts")
-    .select("*")
-    .eq("user_id", userId)
-    .order("created_at", { ascending: true });
+    const { data, error } = await supabase
+      .from("emergency_contacts")
+      .select("*")
+      .eq("user_id", userId)
+      .order("created_at", { ascending: true });
 
-  if (error) return res.status(500).json({ error: "CONTACTS_FETCH_FAILED", details: error.message });
-  return res.json({ contacts: data ?? [] });
-});
+    if (error) return res.status(500).json({ error: "CONTACTS_FETCH_FAILED", details: error.message });
+    return res.json({ contacts: data ?? [] });
+  });
 
 matchesRouter.post(
   "/api/emergency-contacts",
   requireAuth,
   requireBodyFieldMatchesAuth("user_id"),
   async (req: Request, res: Response) => {
-  const { user_id, contact_name, contact_phone } = req.body;
-  if (!user_id) return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
+    const { user_id, contact_name, contact_phone } = req.body;
+    if (!user_id) return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
 
-  const caps = await getDbCapabilities();
-  if (!caps.emergencyContactsTable) return migrationPending(res, "Emergency contacts");
+    const caps = await getDbCapabilities();
+    if (!caps.emergencyContactsTable) return migrationPending(res, "Emergency contacts");
 
-  const validationError = validateEmergencyContact(contact_name, contact_phone);
-  if (validationError) return res.status(400).json({ error: validationError });
+    const validationError = validateEmergencyContact(contact_name, contact_phone);
+    if (validationError) return res.status(400).json({ error: validationError });
 
-  const { count, error: countError } = await supabase
-    .from("emergency_contacts")
-    .select("id", { count: "exact", head: true })
-    .eq("user_id", user_id);
+    const { count, error: countError } = await supabase
+      .from("emergency_contacts")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", user_id);
 
-  if (countError) return res.status(500).json({ error: "CONTACTS_FETCH_FAILED", details: countError.message });
-  if ((count ?? 0) >= MAX_EMERGENCY_CONTACTS) {
-    return res.status(409).json({ error: "EMERGENCY_CONTACT_LIMIT_REACHED" });
-  }
-
-  const { data, error } = await supabase
-    .from("emergency_contacts")
-    .insert({
-      user_id,
-      contact_name: String(contact_name).trim(),
-      contact_phone: normalizePhoneInput(String(contact_phone)),
-    })
-    .select()
-    .single();
-
-  if (error) {
-    const msg = error.message ?? "";
-    if (msg.includes("emergency_contacts_user_id_contact_phone_key")) {
-      return res.status(409).json({ error: "DUPLICATE_CONTACT_PHONE" });
+    if (countError) return res.status(500).json({ error: "CONTACTS_FETCH_FAILED", details: countError.message });
+    if ((count ?? 0) >= MAX_EMERGENCY_CONTACTS) {
+      return res.status(409).json({ error: "EMERGENCY_CONTACT_LIMIT_REACHED" });
     }
-    return res.status(500).json({ error: "CONTACT_CREATE_FAILED", details: error.message });
-  }
 
-  return res.status(201).json({ contact: data });
-});
+    const { data, error } = await supabase
+      .from("emergency_contacts")
+      .insert({
+        user_id,
+        contact_name: String(contact_name).trim(),
+        contact_phone: normalizePhoneInput(String(contact_phone)),
+      })
+      .select()
+      .single();
+
+    if (error) {
+      const msg = error.message ?? "";
+      if (msg.includes("emergency_contacts_user_id_contact_phone_key")) {
+        return res.status(409).json({ error: "DUPLICATE_CONTACT_PHONE" });
+      }
+      return res.status(500).json({ error: "CONTACT_CREATE_FAILED", details: error.message });
+    }
+
+    return res.status(201).json({ contact: data });
+  });
 
 matchesRouter.delete(
   "/api/emergency-contacts/:id",
   requireAuth,
   requireQueryFieldMatchesAuth("user_id"),
   async (req: Request, res: Response) => {
-  const userId = req.query.user_id as string | undefined;
-  if (!userId) return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
+    const userId = req.query.user_id as string | undefined;
+    if (!userId) return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
 
-  const caps = await getDbCapabilities();
-  if (!caps.emergencyContactsTable) return migrationPending(res, "Emergency contacts");
+    const caps = await getDbCapabilities();
+    if (!caps.emergencyContactsTable) return migrationPending(res, "Emergency contacts");
 
-  const { error } = await supabase
-    .from("emergency_contacts")
-    .delete()
-    .eq("id", req.params.id)
-    .eq("user_id", userId);
+    const { error } = await supabase
+      .from("emergency_contacts")
+      .delete()
+      .eq("id", req.params.id)
+      .eq("user_id", userId);
 
-  if (error) return res.status(500).json({ error: "CONTACT_DELETE_FAILED", details: error.message });
-  return res.json({ deleted: true });
-});
+    if (error) return res.status(500).json({ error: "CONTACT_DELETE_FAILED", details: error.message });
+    return res.json({ deleted: true });
+  });
 
 /** SOS audit trail. The wa.me alerts themselves open client-side (free,
  *  no gateway); this row exists so the user has their own record. */
@@ -1115,29 +1111,29 @@ matchesRouter.post(
   requireAuth,
   requireBodyFieldMatchesAuth("user_id"),
   async (req: Request, res: Response) => {
-  const { user_id, trip_request_id, ride_id, lat, lng } = req.body;
-  if (!user_id || typeof lat !== "number" || typeof lng !== "number") {
-    return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
-  }
+    const { user_id, trip_request_id, ride_id, lat, lng } = req.body;
+    if (!user_id || typeof lat !== "number" || typeof lng !== "number") {
+      return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
+    }
 
-  const caps = await getDbCapabilities();
-  if (!caps.sosEventsTable) return migrationPending(res, "SOS event logging");
+    const caps = await getDbCapabilities();
+    if (!caps.sosEventsTable) return migrationPending(res, "SOS event logging");
 
-  const { data, error } = await supabase
-    .from("sos_events")
-    .insert({
-      user_id,
-      trip_request_id: trip_request_id ?? null,
-      ride_id: ride_id ?? null,
-      lat,
-      lng,
-    })
-    .select()
-    .single();
+    const { data, error } = await supabase
+      .from("sos_events")
+      .insert({
+        user_id,
+        trip_request_id: trip_request_id ?? null,
+        ride_id: ride_id ?? null,
+        lat,
+        lng,
+      })
+      .select()
+      .single();
 
-  if (error) return res.status(500).json({ error: "SOS_EVENT_CREATE_FAILED", details: error.message });
-  return res.status(201).json({ sos_event_id: data.id });
-});
+    if (error) return res.status(500).json({ error: "SOS_EVENT_CREATE_FAILED", details: error.message });
+    return res.status(201).json({ sos_event_id: data.id });
+  });
 
 /** SOS: nearest police station(s) to a position, via OpenStreetMap
  *  Overpass. Best-effort by design — a failed/slow lookup returns an
@@ -1272,42 +1268,42 @@ matchesRouter.post(
   requireAuth,
   requireBodyFieldMatchesAuth("rater_id"),
   async (req: Request, res: Response) => {
-  const { ride_id, rater_id, rated_user_id, stars, comment } = req.body;
-  if (!ride_id || !rater_id || !rated_user_id) {
-    return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
-  }
-  if (rater_id === rated_user_id) {
-    return res.status(400).json({ error: "CANNOT_RATE_SELF" });
-  }
-
-  const caps = await getDbCapabilities();
-  if (!caps.ratingsTable) return migrationPending(res, "Post-ride ratings");
-
-  const validationError = validateRatingInput(stars, comment);
-  if (validationError) return res.status(400).json({ error: validationError });
-
-  const { data, error } = await supabase
-    .from("ratings")
-    .insert({
-      ride_id,
-      rater_id,
-      rated_user_id,
-      stars,
-      comment: comment != null ? String(comment).trim() : null,
-    })
-    .select()
-    .single();
-
-  if (error) {
-    const msg = error.message ?? "";
-    if (msg.includes("ratings_ride_id_rater_id_rated_user_id_key") || msg.includes("duplicate key")) {
-      return res.status(409).json({ error: "RATING_ALREADY_EXISTS" });
+    const { ride_id, rater_id, rated_user_id, stars, comment } = req.body;
+    if (!ride_id || !rater_id || !rated_user_id) {
+      return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
     }
-    return res.status(500).json({ error: "RATING_CREATE_FAILED", details: error.message });
-  }
+    if (rater_id === rated_user_id) {
+      return res.status(400).json({ error: "CANNOT_RATE_SELF" });
+    }
 
-  return res.status(201).json({ rating_id: data.id });
-});
+    const caps = await getDbCapabilities();
+    if (!caps.ratingsTable) return migrationPending(res, "Post-ride ratings");
+
+    const validationError = validateRatingInput(stars, comment);
+    if (validationError) return res.status(400).json({ error: validationError });
+
+    const { data, error } = await supabase
+      .from("ratings")
+      .insert({
+        ride_id,
+        rater_id,
+        rated_user_id,
+        stars,
+        comment: comment != null ? String(comment).trim() : null,
+      })
+      .select()
+      .single();
+
+    if (error) {
+      const msg = error.message ?? "";
+      if (msg.includes("ratings_ride_id_rater_id_rated_user_id_key") || msg.includes("duplicate key")) {
+        return res.status(409).json({ error: "RATING_ALREADY_EXISTS" });
+      }
+      return res.status(500).json({ error: "RATING_CREATE_FAILED", details: error.message });
+    }
+
+    return res.status(201).json({ rating_id: data.id });
+  });
 
 matchesRouter.get("/api/users/:id/rating-summary", async (req: Request, res: Response) => {
   const caps = await getDbCapabilities();
@@ -1337,142 +1333,142 @@ matchesRouter.get(
   requireAuth,
   requireQueryFieldMatchesAuth("viewer_id"),
   async (req: Request, res: Response) => {
-  const ratedUserId = req.query.rated_user_id as string | undefined;
-  const viewerId = req.query.viewer_id as string | undefined;
-  if (!ratedUserId || !viewerId) return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
+    const ratedUserId = req.query.rated_user_id as string | undefined;
+    const viewerId = req.query.viewer_id as string | undefined;
+    if (!ratedUserId || !viewerId) return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
 
-  const caps = await getDbCapabilities();
-  if (!caps.ratingsTable) return migrationPending(res, "Post-ride ratings");
-  if (viewerId !== ratedUserId) {
-    // Only the rated user may browse their own rating details; a rater
-    // fetches their own rows via the rater_id filter below.
-    const { data: ownRows } = await supabase
+    const caps = await getDbCapabilities();
+    if (!caps.ratingsTable) return migrationPending(res, "Post-ride ratings");
+    if (viewerId !== ratedUserId) {
+      // Only the rated user may browse their own rating details; a rater
+      // fetches their own rows via the rater_id filter below.
+      const { data: ownRows } = await supabase
+        .from("ratings")
+        .select("*")
+        .eq("rated_user_id", ratedUserId)
+        .eq("rater_id", viewerId);
+      return res.json({ ratings: ownRows ?? [] });
+    }
+
+    const { data, error } = await supabase
       .from("ratings")
       .select("*")
       .eq("rated_user_id", ratedUserId)
-      .eq("rater_id", viewerId);
-    return res.json({ ratings: ownRows ?? [] });
-  }
+      .order("created_at", { ascending: false });
 
-  const { data, error } = await supabase
-    .from("ratings")
-    .select("*")
-    .eq("rated_user_id", ratedUserId)
-    .order("created_at", { ascending: false });
-
-  if (error) return res.status(500).json({ error: "RATINGS_FETCH_FAILED", details: error.message });
-  return res.json({ ratings: data ?? [] });
-});
+    if (error) return res.status(500).json({ error: "RATINGS_FETCH_FAILED", details: error.message });
+    return res.json({ ratings: data ?? [] });
+  });
 
 matchesRouter.post(
   "/api/user-reports",
   requireAuth,
   requireBodyFieldMatchesAuth("reporter_id"),
   async (req: Request, res: Response) => {
-  const { reporter_id, reported_user_id, ride_id, reason, details } = req.body;
-  if (!reporter_id || !reported_user_id) {
-    return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
-  }
-  if (reporter_id === reported_user_id) {
-    return res.status(400).json({ error: "CANNOT_REPORT_SELF" });
-  }
-  if (!isValidReportReason(reason)) {
-    return res.status(400).json({ error: "INVALID_REPORT_REASON" });
-  }
-  if (details != null && (typeof details !== "string" || details.trim().length > 500)) {
-    return res.status(400).json({ error: "DETAILS_TOO_LONG" });
-  }
+    const { reporter_id, reported_user_id, ride_id, reason, details } = req.body;
+    if (!reporter_id || !reported_user_id) {
+      return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
+    }
+    if (reporter_id === reported_user_id) {
+      return res.status(400).json({ error: "CANNOT_REPORT_SELF" });
+    }
+    if (!isValidReportReason(reason)) {
+      return res.status(400).json({ error: "INVALID_REPORT_REASON" });
+    }
+    if (details != null && (typeof details !== "string" || details.trim().length > 500)) {
+      return res.status(400).json({ error: "DETAILS_TOO_LONG" });
+    }
 
-  const caps = await getDbCapabilities();
-  if (!caps.userReportsTable) return migrationPending(res, "User reports");
+    const caps = await getDbCapabilities();
+    if (!caps.userReportsTable) return migrationPending(res, "User reports");
 
-  const { data, error } = await supabase
-    .from("user_reports")
-    .insert({
-      reporter_id,
-      reported_user_id,
-      ride_id: ride_id ?? null,
-      reason,
-      details: details != null ? String(details).trim() : null,
-    })
-    .select()
-    .single();
+    const { data, error } = await supabase
+      .from("user_reports")
+      .insert({
+        reporter_id,
+        reported_user_id,
+        ride_id: ride_id ?? null,
+        reason,
+        details: details != null ? String(details).trim() : null,
+      })
+      .select()
+      .single();
 
-  if (error) return res.status(500).json({ error: "REPORT_CREATE_FAILED", details: error.message });
-  return res.status(201).json({ report_id: data.id });
-});
+    if (error) return res.status(500).json({ error: "REPORT_CREATE_FAILED", details: error.message });
+    return res.status(201).json({ report_id: data.id });
+  });
 
 matchesRouter.post(
   "/api/blocked-users",
   requireAuth,
   requireBodyFieldMatchesAuth("blocker_id"),
   async (req: Request, res: Response) => {
-  const { blocker_id, blocked_id } = req.body;
-  if (!blocker_id || !blocked_id) return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
-  if (blocker_id === blocked_id) return res.status(400).json({ error: "CANNOT_BLOCK_SELF" });
+    const { blocker_id, blocked_id } = req.body;
+    if (!blocker_id || !blocked_id) return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
+    if (blocker_id === blocked_id) return res.status(400).json({ error: "CANNOT_BLOCK_SELF" });
 
-  const caps = await getDbCapabilities();
-  if (!caps.blockedUsersTable) return migrationPending(res, "User blocking");
+    const caps = await getDbCapabilities();
+    if (!caps.blockedUsersTable) return migrationPending(res, "User blocking");
 
-  const { data: existing } = await supabase
-    .from("blocked_users")
-    .select("id")
-    .eq("blocker_id", blocker_id)
-    .eq("blocked_id", blocked_id)
-    .maybeSingle();
+    const { data: existing } = await supabase
+      .from("blocked_users")
+      .select("id")
+      .eq("blocker_id", blocker_id)
+      .eq("blocked_id", blocked_id)
+      .maybeSingle();
 
-  if (existing) return res.json({ block_id: existing.id, already_blocked: true });
+    if (existing) return res.json({ block_id: existing.id, already_blocked: true });
 
-  const { data, error } = await supabase
-    .from("blocked_users")
-    .insert({ blocker_id, blocked_id })
-    .select()
-    .single();
+    const { data, error } = await supabase
+      .from("blocked_users")
+      .insert({ blocker_id, blocked_id })
+      .select()
+      .single();
 
-  if (error) return res.status(500).json({ error: "BLOCK_CREATE_FAILED", details: error.message });
-  return res.status(201).json({ block_id: data.id });
-});
+    if (error) return res.status(500).json({ error: "BLOCK_CREATE_FAILED", details: error.message });
+    return res.status(201).json({ block_id: data.id });
+  });
 
 matchesRouter.get(
   "/api/blocked-users",
   requireAuth,
   requireQueryFieldMatchesAuth("user_id"),
   async (req: Request, res: Response) => {
-  const userId = req.query.user_id as string | undefined;
-  if (!userId) return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
+    const userId = req.query.user_id as string | undefined;
+    if (!userId) return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
 
-  const caps = await getDbCapabilities();
-  if (!caps.blockedUsersTable) return migrationPending(res, "User blocking");
+    const caps = await getDbCapabilities();
+    if (!caps.blockedUsersTable) return migrationPending(res, "User blocking");
 
-  const { data, error } = await supabase
-    .from("blocked_users")
-    .select("*")
-    .or(`blocker_id.eq.${userId},blocked_id.eq.${userId}`);
+    const { data, error } = await supabase
+      .from("blocked_users")
+      .select("*")
+      .or(`blocker_id.eq.${userId},blocked_id.eq.${userId}`);
 
-  if (error) return res.status(500).json({ error: "BLOCKS_FETCH_FAILED", details: error.message });
-  return res.json({ blocks: data ?? [] });
-});
+    if (error) return res.status(500).json({ error: "BLOCKS_FETCH_FAILED", details: error.message });
+    return res.json({ blocks: data ?? [] });
+  });
 
 matchesRouter.delete(
   "/api/blocked-users/:id",
   requireAuth,
   requireQueryFieldMatchesAuth("user_id"),
   async (req: Request, res: Response) => {
-  const userId = req.query.user_id as string | undefined;
-  if (!userId) return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
+    const userId = req.query.user_id as string | undefined;
+    if (!userId) return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
 
-  const caps = await getDbCapabilities();
-  if (!caps.blockedUsersTable) return migrationPending(res, "User blocking");
+    const caps = await getDbCapabilities();
+    if (!caps.blockedUsersTable) return migrationPending(res, "User blocking");
 
-  const { error } = await supabase
-    .from("blocked_users")
-    .delete()
-    .eq("id", req.params.id)
-    .eq("blocker_id", userId);
+    const { error } = await supabase
+      .from("blocked_users")
+      .delete()
+      .eq("id", req.params.id)
+      .eq("blocker_id", userId);
 
-  if (error) return res.status(500).json({ error: "BLOCK_DELETE_FAILED", details: error.message });
-  return res.json({ deleted: true });
-});
+    if (error) return res.status(500).json({ error: "BLOCK_DELETE_FAILED", details: error.message });
+    return res.json({ deleted: true });
+  });
 
 // ─────────────────────────────────────────────────────────────
 // Day 7 Feature 4 support: ride lifecycle for the rating prompt.
@@ -1485,74 +1481,74 @@ matchesRouter.post(
   requireAuth,
   requireBodyFieldMatchesAuth("driver_id"),
   async (req: Request, res: Response) => {
-  const { driver_id, origin, destination, departure_time } = req.body;
-  if (!driver_id || !origin?.lat || !origin?.lng || !destination?.lat || !destination?.lng) {
-    return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
-  }
-
-  const caps = await getDbCapabilities();
-  if (!caps.ridesTable) return migrationPending(res, "Ride creation");
-
-  // Seats are the driver's own declaration, so they are stored, not assumed:
-  // 4 was hardcoded here, which made a "1 seat" offer look like a 4-seat one
-  // to everyone browsing it. Clamped instead of rejected so a stray value
-  // can't strand an already-posted ride.
-  const requestedSeats = Number(req.body.total_seats);
-  const totalSeats = Number.isFinite(requestedSeats)
-    ? Math.min(8, Math.max(1, Math.round(requestedSeats)))
-    : 4;
-  const requestedCap = Number(req.body.driver_max_co_passengers);
-  const maxCoPassengers = Number.isFinite(requestedCap)
-    ? Math.min(8, Math.max(-1, Math.round(requestedCap)))
-    : totalSeats - 1;
-
-  const corridor = coarseCorridorOf(origin, destination);
-  const { data: ownActive } = await supabase
-    .from("rides")
-    .select("*")
-    .eq("driver_id", driver_id)
-    .eq("status", "active");
-
-  // Re-posting the same corridor refreshes the driver's existing car instead
-  // of stacking a second identical listing in ride discovery.
-  const sameCorridor = (ownActive ?? []).find((r: Record<string, any>) => {
-    const rowCorridor = coarseCorridorOf(
-      { lat: r.origin_lat, lng: r.origin_lng },
-      { lat: r.destination_lat, lng: r.destination_lng }
-    );
-    return corridor !== null && rowCorridor === corridor;
-  }) as Record<string, any> | undefined;
-
-  if (sameCorridor) {
-    const occupied = Number(sameCorridor.total_seats ?? 0) - Number(sameCorridor.available_seats ?? 0);
-    const patch: Record<string, any> = {
-      departure_time: departure_time ?? sameCorridor.departure_time ?? new Date().toISOString(),
-      origin_label: origin.address_label ?? sameCorridor.origin_label ?? null,
-      destination_label: destination.address_label ?? sameCorridor.destination_label ?? null,
-    };
-    // Never resize a car people are already riding in — that could push its
-    // free seats below the seats already taken.
-    if (!(occupied > 0)) {
-      patch.total_seats = totalSeats;
-      patch.available_seats = totalSeats;
-      patch.driver_max_co_passengers = maxCoPassengers;
+    const { driver_id, origin, destination, departure_time } = req.body;
+    if (!driver_id || !origin?.lat || !origin?.lng || !destination?.lat || !destination?.lng) {
+      return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
     }
-    const { data: refreshed, error: refreshError } = await supabase
-      .from("rides")
-      .update(patch)
-      .eq("id", sameCorridor.id)
-      .select()
-      .single();
-    if (refreshError) return res.status(500).json({ error: "RIDE_UPDATE_FAILED", details: refreshError.message });
-    return res.status(200).json({ ride_id: refreshed!.id, reused: true });
-  }
 
-  // A new corridor replaces the driver's previous one, but only when nobody
-  // is booked into it: an empty listing for a route they no longer travels
-  // is a ghost that keeps showing up for other people.
-  const { data: staleBookings } =
-    (ownActive ?? []).length > 0
-      ? await supabase
+    const caps = await getDbCapabilities();
+    if (!caps.ridesTable) return migrationPending(res, "Ride creation");
+
+    // Seats are the driver's own declaration, so they are stored, not assumed:
+    // 4 was hardcoded here, which made a "1 seat" offer look like a 4-seat one
+    // to everyone browsing it. Clamped instead of rejected so a stray value
+    // can't strand an already-posted ride.
+    const requestedSeats = Number(req.body.total_seats);
+    const totalSeats = Number.isFinite(requestedSeats)
+      ? Math.min(8, Math.max(1, Math.round(requestedSeats)))
+      : 4;
+    const requestedCap = Number(req.body.driver_max_co_passengers);
+    const maxCoPassengers = Number.isFinite(requestedCap)
+      ? Math.min(8, Math.max(-1, Math.round(requestedCap)))
+      : totalSeats - 1;
+
+    const corridor = coarseCorridorOf(origin, destination);
+    const { data: ownActive } = await supabase
+      .from("rides")
+      .select("*")
+      .eq("driver_id", driver_id)
+      .eq("status", "active");
+
+    // Re-posting the same corridor refreshes the driver's existing car instead
+    // of stacking a second identical listing in ride discovery.
+    const sameCorridor = (ownActive ?? []).find((r: Record<string, any>) => {
+      const rowCorridor = coarseCorridorOf(
+        { lat: r.origin_lat, lng: r.origin_lng },
+        { lat: r.destination_lat, lng: r.destination_lng }
+      );
+      return corridor !== null && rowCorridor === corridor;
+    }) as Record<string, any> | undefined;
+
+    if (sameCorridor) {
+      const occupied = Number(sameCorridor.total_seats ?? 0) - Number(sameCorridor.available_seats ?? 0);
+      const patch: Record<string, any> = {
+        departure_time: departure_time ?? sameCorridor.departure_time ?? new Date().toISOString(),
+        origin_label: origin.address_label ?? sameCorridor.origin_label ?? null,
+        destination_label: destination.address_label ?? sameCorridor.destination_label ?? null,
+      };
+      // Never resize a car people are already riding in — that could push its
+      // free seats below the seats already taken.
+      if (!(occupied > 0)) {
+        patch.total_seats = totalSeats;
+        patch.available_seats = totalSeats;
+        patch.driver_max_co_passengers = maxCoPassengers;
+      }
+      const { data: refreshed, error: refreshError } = await supabase
+        .from("rides")
+        .update(patch)
+        .eq("id", sameCorridor.id)
+        .select()
+        .single();
+      if (refreshError) return res.status(500).json({ error: "RIDE_UPDATE_FAILED", details: refreshError.message });
+      return res.status(200).json({ ride_id: refreshed!.id, reused: true });
+    }
+
+    // A new corridor replaces the driver's previous one, but only when nobody
+    // is booked into it: an empty listing for a route they no longer travels
+    // is a ghost that keeps showing up for other people.
+    const { data: staleBookings } =
+      (ownActive ?? []).length > 0
+        ? await supabase
           .from("ride_bookings")
           .select("ride_id")
           .in(
@@ -1560,38 +1556,38 @@ matchesRouter.post(
             (ownActive ?? []).map((r: Record<string, any>) => r.id)
           )
           .in("status", ["accepted", "pending", "pending_consent"])
-      : { data: [] as { ride_id: string }[] };
-  const ridden = new Set((staleBookings ?? []).map((b: Record<string, any>) => String(b.ride_id)));
-  const ghosts = (ownActive ?? []).filter((r: Record<string, any>) => !ridden.has(String(r.id)));
-  if (ghosts.length > 0) {
-    await supabase
+        : { data: [] as { ride_id: string }[] };
+    const ridden = new Set((staleBookings ?? []).map((b: Record<string, any>) => String(b.ride_id)));
+    const ghosts = (ownActive ?? []).filter((r: Record<string, any>) => !ridden.has(String(r.id)));
+    if (ghosts.length > 0) {
+      await supabase
+        .from("rides")
+        .update({ status: "cancelled" })
+        .in("id", ghosts.map((r: Record<string, any>) => r.id));
+    }
+
+    const { data, error } = await supabase
       .from("rides")
-      .update({ status: "cancelled" })
-      .in("id", ghosts.map((r: Record<string, any>) => r.id));
-  }
+      .insert({
+        driver_id,
+        origin_lat: origin.lat,
+        origin_lng: origin.lng,
+        origin_label: origin.address_label ?? null,
+        destination_lat: destination.lat,
+        destination_lng: destination.lng,
+        destination_label: destination.address_label ?? null,
+        departure_time: departure_time ?? new Date().toISOString(),
+        total_seats: totalSeats,
+        available_seats: totalSeats,
+        driver_max_co_passengers: maxCoPassengers,
+        status: "active",
+      })
+      .select()
+      .single();
 
-  const { data, error } = await supabase
-    .from("rides")
-    .insert({
-      driver_id,
-      origin_lat: origin.lat,
-      origin_lng: origin.lng,
-      origin_label: origin.address_label ?? null,
-      destination_lat: destination.lat,
-      destination_lng: destination.lng,
-      destination_label: destination.address_label ?? null,
-      departure_time: departure_time ?? new Date().toISOString(),
-      total_seats: totalSeats,
-      available_seats: totalSeats,
-      driver_max_co_passengers: maxCoPassengers,
-      status: "active",
-    })
-    .select()
-    .single();
-
-  if (error) return res.status(500).json({ error: "RIDE_CREATE_FAILED", details: error.message });
-  return res.status(201).json({ ride_id: data.id, replaced_listings: ghosts.length });
-});
+    if (error) return res.status(500).json({ error: "RIDE_CREATE_FAILED", details: error.message });
+    return res.status(201).json({ ride_id: data.id, replaced_listings: ghosts.length });
+  });
 
 /** One `rides` row per CAR, not per pairing.
  *
@@ -1705,93 +1701,93 @@ matchesRouter.post(
   requireAuth,
   requireBodyFieldMatchesAuth("user_id"),
   async (req: Request, res: Response) => {
-  const { user_id } = req.body;
-  if (!user_id) return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
+    const { user_id } = req.body;
+    if (!user_id) return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
 
-  const caps = await getDbCapabilities();
-  if (!caps.ridesTable) return migrationPending(res, "Ride completion");
+    const caps = await getDbCapabilities();
+    if (!caps.ridesTable) return migrationPending(res, "Ride completion");
 
-  const { data: rideRow, error: rideError } = await supabase
-    .from("rides")
-    .select("*")
-    .eq("id", req.params.id)
-    .single();
+    const { data: rideRow, error: rideError } = await supabase
+      .from("rides")
+      .select("*")
+      .eq("id", req.params.id)
+      .single();
 
-  if (rideError || !rideRow) return res.status(404).json({ error: "RIDE_NOT_FOUND" });
+    if (rideError || !rideRow) return res.status(404).json({ error: "RIDE_NOT_FOUND" });
 
-  const { data: bookingRows, error: bookingsError } = await supabase
-    .from("ride_bookings")
-    .select("*")
-    .eq("ride_id", req.params.id);
-
-  if (bookingsError) return res.status(500).json({ error: "BOOKINGS_FETCH_FAILED", details: bookingsError.message });
-
-  const isParticipant =
-    rideRow.driver_id === user_id || (bookingRows ?? []).some((b) => b.passenger_id === user_id);
-  if (!isParticipant) return res.status(403).json({ error: "NOT_A_RIDE_PARTICIPANT" });
-
-  // Completion is a fact about the ride, not about whoever taps the button
-  // first. Whoever else joins later still gets their rating prompt, but the
-  // second call must not re-write a ride that is already closed.
-  const alreadyCompleted = rideRow.status === "completed";
-  if (!alreadyCompleted) {
-    await supabase.from("rides").update({ status: "completed" }).eq("id", req.params.id);
-    await supabase
+    const { data: bookingRows, error: bookingsError } = await supabase
       .from("ride_bookings")
-      .update({ status: "completed" })
-      .eq("ride_id", req.params.id)
-      .in("status", ["accepted", "pending"]);
-  }
+      .select("*")
+      .eq("ride_id", req.params.id);
 
-  // Day 9: write the CO2-avoided ledger for this ride so every
-  // rider's profile running total picks it up, not just a one-off
-  // number shown at the fare-estimate stage.
-  let carbonSavings: { rider_id: string; co2_saved_kg: number }[] = [];
-  if (caps.carbonSavingsTable && !alreadyCompleted) {
-    try {
-      const route = await getRoute([
-        { lat: Number(rideRow.origin_lat), lng: Number(rideRow.origin_lng), address_label: rideRow.origin_label ?? "" },
-        { lat: Number(rideRow.destination_lat), lng: Number(rideRow.destination_lng), address_label: rideRow.destination_label ?? "" },
-      ]);
-      const distanceKm = route.distance_m / 1000;
+    if (bookingsError) return res.status(500).json({ error: "BOOKINGS_FETCH_FAILED", details: bookingsError.message });
 
-      const { data: savingsRows, error: savingsError } = await supabase.rpc(
-        "record_ride_carbon_savings",
-        { p_ride_id: req.params.id, p_distance_km: distanceKm }
-      );
-      if (!savingsError && savingsRows) {
-        carbonSavings = savingsRows.map((r: any) => ({
-          rider_id: r.rider_id,
-          co2_saved_kg: Number(r.co2_saved_kg),
-        }));
-      }
-    } catch {
-      // OSRM/route lookup failing shouldn't block ride completion —
-      // the trip is still marked completed, we just skip the ledger.
+    const isParticipant =
+      rideRow.driver_id === user_id || (bookingRows ?? []).some((b) => b.passenger_id === user_id);
+    if (!isParticipant) return res.status(403).json({ error: "NOT_A_RIDE_PARTICIPANT" });
+
+    // Completion is a fact about the ride, not about whoever taps the button
+    // first. Whoever else joins later still gets their rating prompt, but the
+    // second call must not re-write a ride that is already closed.
+    const alreadyCompleted = rideRow.status === "completed";
+    if (!alreadyCompleted) {
+      await supabase.from("rides").update({ status: "completed" }).eq("id", req.params.id);
+      await supabase
+        .from("ride_bookings")
+        .update({ status: "completed" })
+        .eq("ride_id", req.params.id)
+        .in("status", ["accepted", "pending"]);
     }
-  }
 
-  // Everyone else on the ride is rateable by this user.
-  const riderIds = [
-    rideRow.driver_id,
-    ...(bookingRows ?? []).map((b) => b.passenger_id),
-  ].filter((id) => id && id !== user_id);
+    // Day 9: write the CO2-avoided ledger for this ride so every
+    // rider's profile running total picks it up, not just a one-off
+    // number shown at the fare-estimate stage.
+    let carbonSavings: { rider_id: string; co2_saved_kg: number }[] = [];
+    if (caps.carbonSavingsTable && !alreadyCompleted) {
+      try {
+        const route = await getRoute([
+          { lat: Number(rideRow.origin_lat), lng: Number(rideRow.origin_lng), address_label: rideRow.origin_label ?? "" },
+          { lat: Number(rideRow.destination_lat), lng: Number(rideRow.destination_lng), address_label: rideRow.destination_label ?? "" },
+        ]);
+        const distanceKm = route.distance_m / 1000;
 
-  const ratableRiders = riderIds.length > 0
-    ? await supabase.from("users").select("id,display_name").in("id", riderIds)
-    : { data: [] };
+        const { data: savingsRows, error: savingsError } = await supabase.rpc(
+          "record_ride_carbon_savings",
+          { p_ride_id: req.params.id, p_distance_km: distanceKm }
+        );
+        if (!savingsError && savingsRows) {
+          carbonSavings = savingsRows.map((r: any) => ({
+            rider_id: r.rider_id,
+            co2_saved_kg: Number(r.co2_saved_kg),
+          }));
+        }
+      } catch {
+        // OSRM/route lookup failing shouldn't block ride completion —
+        // the trip is still marked completed, we just skip the ledger.
+      }
+    }
 
-  return res.json({
-    ride_id: req.params.id,
-    status: "completed",
-    already_completed: alreadyCompleted,
-    ratable_riders: (ratableRiders.data ?? []).map((u: any) => ({
-      user_id: u.id,
-      display_name: u.display_name,
-    })),
-    carbon_savings: carbonSavings, // [{ rider_id, co2_saved_kg }, ...] — this user's entry is in here too
+    // Everyone else on the ride is rateable by this user.
+    const riderIds = [
+      rideRow.driver_id,
+      ...(bookingRows ?? []).map((b) => b.passenger_id),
+    ].filter((id) => id && id !== user_id);
+
+    const ratableRiders = riderIds.length > 0
+      ? await supabase.from("users").select("id,display_name").in("id", riderIds)
+      : { data: [] };
+
+    return res.json({
+      ride_id: req.params.id,
+      status: "completed",
+      already_completed: alreadyCompleted,
+      ratable_riders: (ratableRiders.data ?? []).map((u: any) => ({
+        user_id: u.id,
+        display_name: u.display_name,
+      })),
+      carbon_savings: carbonSavings, // [{ rider_id, co2_saved_kg }, ...] — this user's entry is in here too
+    });
   });
-});
 
 // Re-probe the schema after migrations are applied, without a restart.
 matchesRouter.post("/api/admin/refresh-db-capabilities", requireAuth, async (_req: Request, res: Response) => {
@@ -1815,22 +1811,22 @@ matchesRouter.get(
     next();
   },
   async (req: Request, res: Response) => {
-  const caps = await getDbCapabilities();
-  if (!caps.carbonSavingsTable) return migrationPending(res, "Carbon savings history");
+    const caps = await getDbCapabilities();
+    if (!caps.carbonSavingsTable) return migrationPending(res, "Carbon savings history");
 
-  const { data, error } = await supabase
-    .from("carbon_savings")
-    .select("ride_id, co2_saved_kg, rider_count, distance_km, created_at")
-    .eq("rider_id", req.params.id)
-    .order("created_at", { ascending: false });
+    const { data, error } = await supabase
+      .from("carbon_savings")
+      .select("ride_id, co2_saved_kg, rider_count, distance_km, created_at")
+      .eq("rider_id", req.params.id)
+      .order("created_at", { ascending: false });
 
-  if (error) return res.status(500).json({ error: "CARBON_SAVINGS_FETCH_FAILED", details: error.message });
+    if (error) return res.status(500).json({ error: "CARBON_SAVINGS_FETCH_FAILED", details: error.message });
 
-  const rows = data ?? [];
-  const totalKg = Number(rows.reduce((sum, r) => sum + Number(r.co2_saved_kg), 0).toFixed(2));
+    const rows = data ?? [];
+    const totalKg = Number(rows.reduce((sum, r) => sum + Number(r.co2_saved_kg), 0).toFixed(2));
 
-  return res.json({ total_co2_saved_kg: totalKg, rides: rows });
-});
+    return res.json({ total_co2_saved_kg: totalKg, rides: rows });
+  });
 
 /** Personal dashboard aggregate: profile, rating, ride history, CO₂, est. money saved. */
 matchesRouter.get(
@@ -2051,120 +2047,120 @@ matchesRouter.post(
   requireAuth,
   requireBodyFieldMatchesAuth("passenger_id"),
   async (req: Request, res: Response) => {
-  const { passenger_id, max_co_passengers, seats_requested, pickup_point, dropoff_point } = req.body;
+    const { passenger_id, max_co_passengers, seats_requested, pickup_point, dropoff_point } = req.body;
 
-  if (!passenger_id || max_co_passengers === undefined || !pickup_point || !dropoff_point) {
-    return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
-  }
+    if (!passenger_id || max_co_passengers === undefined || !pickup_point || !dropoff_point) {
+      return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
+    }
 
-  const { data: rideRow, error: rideError } = await supabase
-    .from("rides")
-    .select("*")
-    .eq("id", req.params.id)
-    .single();
+    const { data: rideRow, error: rideError } = await supabase
+      .from("rides")
+      .select("*")
+      .eq("id", req.params.id)
+      .single();
 
-  if (rideError || !rideRow) {
-    return res.status(404).json({ error: "RIDE_NOT_FOUND" });
-  }
+    if (rideError || !rideRow) {
+      return res.status(404).json({ error: "RIDE_NOT_FOUND" });
+    }
 
-  const { data: bookingRows, error: bookingsError } = await supabase
-    .from("ride_bookings")
-    .select("*")
-    .eq("ride_id", req.params.id)
-    .in("status", ["accepted", "pending"]);
+    const { data: bookingRows, error: bookingsError } = await supabase
+      .from("ride_bookings")
+      .select("*")
+      .eq("ride_id", req.params.id)
+      .in("status", ["accepted", "pending"]);
 
-  if (bookingsError) {
-    return res.status(500).json({ error: "BOOKINGS_FETCH_FAILED", details: bookingsError.message });
-  }
+    if (bookingsError) {
+      return res.status(500).json({ error: "BOOKINGS_FETCH_FAILED", details: bookingsError.message });
+    }
 
-  const ride = mapToRideWithBookings(rideRow, bookingRows ?? []);
+    const ride = mapToRideWithBookings(rideRow, bookingRows ?? []);
 
-  const result = canAddPassenger(
-    {
-      passenger_id,
-      seats_requested: seats_requested ?? 1,
-      max_co_passengers,
-      pickup_point,
-      dropoff_point,
-    },
-    ride
-  );
+    const result = canAddPassenger(
+      {
+        passenger_id,
+        seats_requested: seats_requested ?? 1,
+        max_co_passengers,
+        pickup_point,
+        dropoff_point,
+      },
+      ride
+    );
 
-  return res.json(result);
-});
+    return res.json(result);
+  });
 
 matchesRouter.post(
   "/api/rides/:id/book",
   requireAuth,
   requireBodyFieldMatchesAuth("passenger_id"),
   async (req: Request, res: Response) => {
-  const {
-    passenger_id, max_co_passengers, seats_requested, pickup_point, dropoff_point,
-    party_member_names,
-  } = req.body;
+    const {
+      passenger_id, max_co_passengers, seats_requested, pickup_point, dropoff_point,
+      party_member_names,
+    } = req.body;
 
-  if (!passenger_id || max_co_passengers === undefined || !pickup_point || !dropoff_point) {
-    return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
-  }
+    if (!passenger_id || max_co_passengers === undefined || !pickup_point || !dropoff_point) {
+      return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
+    }
 
-  // One booking for a whole party: seats_requested = party_size (1..4),
-  // with optional names (max 3, excluding the lead) so the driver knows
-  // who is coming. Server-side validation only — never trust the client.
-  const partySize = seats_requested ?? 1;
-  if (!Number.isInteger(partySize) || partySize < 1 || partySize > 4) {
-    return res.status(400).json({ error: "INVALID_PARTY_SIZE" });
-  }
-  if (party_member_names != null) {
-    const ok =
-      Array.isArray(party_member_names) &&
-      party_member_names.length <= 3 &&
-      party_member_names.every((n) => typeof n === "string" && n.trim().length > 0);
-    if (!ok) return res.status(400).json({ error: "INVALID_PARTY_MEMBER_NAMES" });
-  }
+    // One booking for a whole party: seats_requested = party_size (1..4),
+    // with optional names (max 3, excluding the lead) so the driver knows
+    // who is coming. Server-side validation only — never trust the client.
+    const partySize = seats_requested ?? 1;
+    if (!Number.isInteger(partySize) || partySize < 1 || partySize > 4) {
+      return res.status(400).json({ error: "INVALID_PARTY_SIZE" });
+    }
+    if (party_member_names != null) {
+      const ok =
+        Array.isArray(party_member_names) &&
+        party_member_names.length <= 3 &&
+        party_member_names.every((n) => typeof n === "string" && n.trim().length > 0);
+      if (!ok) return res.status(400).json({ error: "INVALID_PARTY_MEMBER_NAMES" });
+    }
 
-  const { data, error } = await supabase.rpc("book_pooled_ride", {
-    p_ride_id: req.params.id,
-    p_passenger_id: passenger_id,
-    p_pickup_lat: pickup_point.lat,
-    p_pickup_lng: pickup_point.lng,
-    p_pickup_label: pickup_point.address_label ?? null,
-    p_dropoff_lat: dropoff_point.lat,
-    p_dropoff_lng: dropoff_point.lng,
-    p_dropoff_label: dropoff_point.address_label ?? null,
-    p_seats_requested: partySize,
-    p_max_co_passengers: max_co_passengers,
-    p_party_member_names: party_member_names ?? null,
-  });
-
-  if (error) {
-    return res.status(500).json({ error: "BOOKING_RPC_FAILED", details: error.message });
-  }
-
-  const outcome = Array.isArray(data) ? data[0] : data;
-
-  if (!outcome?.success) {
-    // PARTY_TOO_LARGE_FOR_REMAINING_SEATS carries the free seat count so
-    // the UI can say "only N seats left" instead of a bare no.
-    return res.status(409).json({
-      error: "BOOKING_REJECTED",
-      reason: outcome?.reason ?? "UNKNOWN",
-      remaining_seats: outcome?.remaining_seats ?? null,
+    const { data, error } = await supabase.rpc("book_pooled_ride", {
+      p_ride_id: req.params.id,
+      p_passenger_id: passenger_id,
+      p_pickup_lat: pickup_point.lat,
+      p_pickup_lng: pickup_point.lng,
+      p_pickup_label: pickup_point.address_label ?? null,
+      p_dropoff_lat: dropoff_point.lat,
+      p_dropoff_lng: dropoff_point.lng,
+      p_dropoff_label: dropoff_point.address_label ?? null,
+      p_seats_requested: partySize,
+      p_max_co_passengers: max_co_passengers,
+      p_party_member_names: party_member_names ?? null,
     });
-  }
 
-  // Day 9: a 3+ person pool doesn't finalize immediately — it's booked
-  // as pending_consent and waits on the dual-consent vote (see
-  // /api/rides/:id/bookings/:bookingId/consent below). Tell the caller
-  // which case this was so the frontend can show "waiting on group"
-  // instead of "you're in" for AWAITING_GROUP_CONSENT.
-  return res.status(201).json({
-    success: true,
-    booking_id: outcome.booking_id,
-    status: outcome.reason === "AWAITING_GROUP_CONSENT" ? "pending_consent" : "accepted",
-    reason: outcome.reason,
-    remaining_seats: outcome.remaining_seats ?? null,
+    if (error) {
+      return res.status(500).json({ error: "BOOKING_RPC_FAILED", details: error.message });
+    }
+
+    const outcome = Array.isArray(data) ? data[0] : data;
+
+    if (!outcome?.success) {
+      // PARTY_TOO_LARGE_FOR_REMAINING_SEATS carries the free seat count so
+      // the UI can say "only N seats left" instead of a bare no.
+      return res.status(409).json({
+        error: "BOOKING_REJECTED",
+        reason: outcome?.reason ?? "UNKNOWN",
+        remaining_seats: outcome?.remaining_seats ?? null,
+      });
+    }
+
+    // Day 9: a 3+ person pool doesn't finalize immediately — it's booked
+    // as pending_consent and waits on the dual-consent vote (see
+    // /api/rides/:id/bookings/:bookingId/consent below). Tell the caller
+    // which case this was so the frontend can show "waiting on group"
+    // instead of "you're in" for AWAITING_GROUP_CONSENT.
+    return res.status(201).json({
+      success: true,
+      booking_id: outcome.booking_id,
+      status: outcome.reason === "AWAITING_GROUP_CONSENT" ? "pending_consent" : "accepted",
+      reason: outcome.reason,
+      remaining_seats: outcome.remaining_seats ?? null,
+    });
   });
-});
 
 // Live occupancy of a ride, counted in PEOPLE (parties included, pending
 // bookings treated as reserved) — see get_ride_occupancy() in
@@ -2175,65 +2171,65 @@ matchesRouter.get(
   "/api/rides/:id/occupancy",
   requireAuth,
   async (req: Request, res: Response) => {
-  const viewerId = await resolveCanonicalUserId(req.auth!.userId);
-  if (!viewerId) return res.status(403).json({ error: "NOT_A_RIDE_PARTICIPANT" });
+    const viewerId = await resolveCanonicalUserId(req.auth!.userId);
+    if (!viewerId) return res.status(403).json({ error: "NOT_A_RIDE_PARTICIPANT" });
 
-  const { data, error } = await supabase.rpc("get_ride_occupancy", {
-    p_ride_id: req.params.id,
-    p_viewer_id: viewerId,
+    const { data, error } = await supabase.rpc("get_ride_occupancy", {
+      p_ride_id: req.params.id,
+      p_viewer_id: viewerId,
+    });
+
+    if (error) {
+      return res.status(500).json({ error: "OCCUPANCY_RPC_FAILED", details: error.message });
+    }
+
+    const row = Array.isArray(data) ? data[0] : data;
+    if (!row) return res.status(403).json({ error: "NOT_A_RIDE_PARTICIPANT" });
+
+    return res.json({
+      ride_id: row.ride_id,
+      total_people_capacity: row.total_people_capacity,
+      occupied_people: row.occupied_people,
+      seats_left: row.seats_left,
+      status: row.status,
+      co_riders: row.co_riders,
+    });
   });
-
-  if (error) {
-    return res.status(500).json({ error: "OCCUPANCY_RPC_FAILED", details: error.message });
-  }
-
-  const row = Array.isArray(data) ? data[0] : data;
-  if (!row) return res.status(403).json({ error: "NOT_A_RIDE_PARTICIPANT" });
-
-  return res.json({
-    ride_id: row.ride_id,
-    total_people_capacity: row.total_people_capacity,
-    occupied_people: row.occupied_people,
-    seats_left: row.seats_left,
-    status: row.status,
-    co_riders: row.co_riders,
-  });
-});
 
 matchesRouter.post(
   "/api/rides/:id/bookings/:bookingId/consent",
   requireAuth,
   requireBodyFieldMatchesAuth("rider_id"),
   async (req: Request, res: Response) => {
-  const { rider_id, agree } = req.body;
-  if (!rider_id || typeof agree !== "boolean") {
-    return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
-  }
+    const { rider_id, agree } = req.body;
+    if (!rider_id || typeof agree !== "boolean") {
+      return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
+    }
 
-  const caps = await getDbCapabilities();
-  if (!caps.rideConsentsTable) return migrationPending(res, "Group ride consent");
+    const caps = await getDbCapabilities();
+    if (!caps.rideConsentsTable) return migrationPending(res, "Group ride consent");
 
-  await expireStaleConsents();
+    await expireStaleConsents();
 
-  const { data, error } = await supabase.rpc("respond_to_ride_consent", {
-    p_booking_id: req.params.bookingId,
-    p_rider_id: rider_id,
-    p_agree: agree,
+    const { data, error } = await supabase.rpc("respond_to_ride_consent", {
+      p_booking_id: req.params.bookingId,
+      p_rider_id: rider_id,
+      p_agree: agree,
+    });
+
+    if (error) return res.status(500).json({ error: "CONSENT_RPC_FAILED", details: error.message });
+
+    const outcome = Array.isArray(data) ? data[0] : data;
+    if (!outcome?.success) {
+      return res.status(409).json({ error: "CONSENT_REJECTED", reason: outcome?.reason ?? "UNKNOWN" });
+    }
+
+    return res.json({
+      success: true,
+      booking_status: outcome.booking_status,
+      reason: outcome.reason, // ALL_AGREED | AWAITING_OTHERS | DECLINED
+    });
   });
-
-  if (error) return res.status(500).json({ error: "CONSENT_RPC_FAILED", details: error.message });
-
-  const outcome = Array.isArray(data) ? data[0] : data;
-  if (!outcome?.success) {
-    return res.status(409).json({ error: "CONSENT_REJECTED", reason: outcome?.reason ?? "UNKNOWN" });
-  }
-
-  return res.json({
-    success: true,
-    booking_status: outcome.booking_status,
-    reason: outcome.reason, // ALL_AGREED | AWAITING_OTHERS | DECLINED
-  });
-});
 
 // Lets the frontend show "waiting on Ali, Sara..." instead of a bare
 // spinner while a pending_consent booking is still being voted on.
@@ -2241,33 +2237,33 @@ matchesRouter.get(
   "/api/rides/:id/bookings/:bookingId/consent",
   requireAuth,
   async (req: Request, res: Response) => {
-  const caps = await getDbCapabilities();
-  if (!caps.rideConsentsTable) return migrationPending(res, "Group ride consent");
+    const caps = await getDbCapabilities();
+    if (!caps.rideConsentsTable) return migrationPending(res, "Group ride consent");
 
-  await expireStaleConsents();
+    await expireStaleConsents();
 
-  const { data, error } = await supabase
-    .from("ride_consents")
-    .select("rider_id, status, responded_at, users:rider_id(display_name)")
-    .eq("booking_id", req.params.bookingId);
+    const { data, error } = await supabase
+      .from("ride_consents")
+      .select("rider_id, status, responded_at, users:rider_id(display_name)")
+      .eq("booking_id", req.params.bookingId);
 
-  if (error) return res.status(500).json({ error: "CONSENT_FETCH_FAILED", details: error.message });
+    if (error) return res.status(500).json({ error: "CONSENT_FETCH_FAILED", details: error.message });
 
-  const votes = data ?? [];
-  // Only someone actually in this vote (a rider being asked to agree)
-  // may see who else has/hasn't responded — not any authenticated user.
-  const isParticipant = votes.some((v: any) => v.rider_id === req.auth?.userId);
-  if (!isParticipant) return res.status(403).json({ error: "NOT_A_VOTER_ON_THIS_BOOKING" });
+    const votes = data ?? [];
+    // Only someone actually in this vote (a rider being asked to agree)
+    // may see who else has/hasn't responded — not any authenticated user.
+    const isParticipant = votes.some((v: any) => v.rider_id === req.auth?.userId);
+    if (!isParticipant) return res.status(403).json({ error: "NOT_A_VOTER_ON_THIS_BOOKING" });
 
-  return res.json({
-    votes: votes.map((v: any) => ({
-      rider_id: v.rider_id,
-      display_name: v.users?.display_name ?? null,
-      status: v.status,
-      responded_at: v.responded_at,
-    })),
+    return res.json({
+      votes: votes.map((v: any) => ({
+        rider_id: v.rider_id,
+        display_name: v.users?.display_name ?? null,
+        status: v.status,
+        responded_at: v.responded_at,
+      })),
+    });
   });
-});
 
 // ─────────────────────────────────────────────────────────────
 // RouteSync Phase 3: ride group chat, live location sharing, and
@@ -2698,11 +2694,11 @@ async function loadBrowseCars(): Promise<BrowseCar[]> {
     : "user_id, origin_lat, origin_lng, destination_lat, destination_lng";
   const { data: tripRows, error: tripsError } = driverIds.length
     ? await supabase
-        .from("trip_requests")
-        .select(tripSelect)
-        .in("user_id", driverIds)
-        .eq("status", "active")
-        .limit(2000)
+      .from("trip_requests")
+      .select(tripSelect)
+      .in("user_id", driverIds)
+      .eq("status", "active")
+      .limit(2000)
     : { data: [] as any[], error: null };
   const tripsKnown = !tripsError;
   const VEHICLED = new Set(["car", "bike", "ride_hailing"]);
@@ -2781,7 +2777,7 @@ async function loadBrowseCars(): Promise<BrowseCar[]> {
       (drafts.has(compKey(corridor, req.toUserId)) && !drafts.has(compKey(corridor, req.fromUserId))
         ? req.toUserId
         : drafts.has(compKey(corridor, req.fromUserId)) &&
-            !drafts.has(compKey(corridor, req.toUserId))
+          !drafts.has(compKey(corridor, req.toUserId))
           ? req.fromUserId
           : null);
     if (!hostSide) continue;
@@ -2880,64 +2876,64 @@ matchesRouter.get(
   requireAuth,
   requireQueryFieldMatchesAuth("viewer_id"),
   async (req: Request, res: Response) => {
-  const caps = await getDbCapabilities();
-  if (!caps.ridesTable) return migrationPending(res, "Ride discovery");
+    const caps = await getDbCapabilities();
+    if (!caps.ridesTable) return migrationPending(res, "Ride discovery");
 
-  const viewerId = req.query.viewer_id as string;
-  const cars = await loadBrowseCars();
+    const viewerId = req.query.viewer_id as string;
+    const cars = await loadBrowseCars();
 
-  const listings = cars
-    // Already in this car (or the one offering it)? Not an option.
-    .filter(
-      (car) =>
-        car.driver_id !== viewerId && !car.members.has(viewerId) && !car.pending.has(viewerId)
-    )
-    .map((car) => {
-      const members = [...car.members.values()];
-      const pendingMembers = [...car.pending.values()].filter((p) => !car.members.has(p.user_id));
-      const riderCount = members.length + 1; // + whoever hosts the car
-      const r = car.row;
-      const distanceKm = r.distance_km ?? null;
-      return {
-        ride_id: car.ride_id,
-        // Who the join is addressed to: the person hosting the car, which
-        // for a rebuilt legacy car is NOT whoever the surviving `rides`
-        // row happens to name. A join sends the approve-and-chat request
-        // here and this is who can approve it.
-        owner_user_id: car.driver_id,
-        driver_display_name: car.driver_display_name,
-        driver_is_verified: car.driver_is_verified,
-        origin_label: r.origin_label,
-        destination_label: r.destination_label,
-        // Full coordinate points so the frontend can build a match-request
-        // snapshot (the approve → conditions → chat handshake) from a ride.
-        origin: { lat: r.origin_lat, lng: r.origin_lng, address_label: r.origin_label },
-        destination: { lat: r.destination_lat, lng: r.destination_lng, address_label: r.destination_label },
-        departure_time: r.departure_time,
-        // Counted from who is actually in the car, since duplicate rows
-        // each still read their own untouched seat total.
-        available_seats: car.available_seats,
-        total_seats: car.total_seats,
-        driver_max_co_passengers: r.driver_max_co_passengers,
-        current_rider_count: riderCount,
-        // Who's already in this car — the card renders one group, not
-        // lone profiles, and a join is addressed to the whole car.
-        members,
-        pending_members: pendingMembers,
-        // Stable key the frontend echoes back as the request's group, so
-        // every join into this car folds into ONE group chat. A ride row
-        // has no trip_request column, so the ride id IS the car's identity.
-        group_key: car.ride_id,
-        // Riders after this viewer joins — used by the frontend to warn
-        // "this join will need everyone's approval" before they even submit.
-        will_need_group_consent: riderCount + 1 >= 3,
-        co2_saved_summary: distanceKm ? co2SavedSummary(distanceKm, riderCount + 1) : null,
-      };
-    })
-    .sort((a, b) => String(a.departure_time ?? "").localeCompare(String(b.departure_time ?? "")));
+    const listings = cars
+      // Already in this car (or the one offering it)? Not an option.
+      .filter(
+        (car) =>
+          car.driver_id !== viewerId && !car.members.has(viewerId) && !car.pending.has(viewerId)
+      )
+      .map((car) => {
+        const members = [...car.members.values()];
+        const pendingMembers = [...car.pending.values()].filter((p) => !car.members.has(p.user_id));
+        const riderCount = members.length + 1; // + whoever hosts the car
+        const r = car.row;
+        const distanceKm = r.distance_km ?? null;
+        return {
+          ride_id: car.ride_id,
+          // Who the join is addressed to: the person hosting the car, which
+          // for a rebuilt legacy car is NOT whoever the surviving `rides`
+          // row happens to name. A join sends the approve-and-chat request
+          // here and this is who can approve it.
+          owner_user_id: car.driver_id,
+          driver_display_name: car.driver_display_name,
+          driver_is_verified: car.driver_is_verified,
+          origin_label: r.origin_label,
+          destination_label: r.destination_label,
+          // Full coordinate points so the frontend can build a match-request
+          // snapshot (the approve → conditions → chat handshake) from a ride.
+          origin: { lat: r.origin_lat, lng: r.origin_lng, address_label: r.origin_label },
+          destination: { lat: r.destination_lat, lng: r.destination_lng, address_label: r.destination_label },
+          departure_time: r.departure_time,
+          // Counted from who is actually in the car, since duplicate rows
+          // each still read their own untouched seat total.
+          available_seats: car.available_seats,
+          total_seats: car.total_seats,
+          driver_max_co_passengers: r.driver_max_co_passengers,
+          current_rider_count: riderCount,
+          // Who's already in this car — the card renders one group, not
+          // lone profiles, and a join is addressed to the whole car.
+          members,
+          pending_members: pendingMembers,
+          // Stable key the frontend echoes back as the request's group, so
+          // every join into this car folds into ONE group chat. A ride row
+          // has no trip_request column, so the ride id IS the car's identity.
+          group_key: car.ride_id,
+          // Riders after this viewer joins — used by the frontend to warn
+          // "this join will need everyone's approval" before they even submit.
+          will_need_group_consent: riderCount + 1 >= 3,
+          co2_saved_summary: distanceKm ? co2SavedSummary(distanceKm, riderCount + 1) : null,
+        };
+      })
+      .sort((a, b) => String(a.departure_time ?? "").localeCompare(String(b.departure_time ?? "")));
 
-  return res.json({ rides: listings });
-});
+    return res.json({ rides: listings });
+  });
 
 // Everything a rider is currently being asked to vote on, across every
 // ride — a notification inbox, not a per-booking lookup, since the
@@ -2952,39 +2948,39 @@ matchesRouter.get(
     next();
   },
   async (req: Request, res: Response) => {
-  const caps = await getDbCapabilities();
-  if (!caps.rideConsentsTable) return migrationPending(res, "Group ride consent");
+    const caps = await getDbCapabilities();
+    if (!caps.rideConsentsTable) return migrationPending(res, "Group ride consent");
 
-  // Sweep first so a booking whose deadline just passed doesn't show
-  // up as "awaiting" for one more poll cycle before disappearing.
-  await expireStaleConsents();
+    // Sweep first so a booking whose deadline just passed doesn't show
+    // up as "awaiting" for one more poll cycle before disappearing.
+    await expireStaleConsents();
 
-  const { data, error } = await supabase
-    .from("ride_consents")
-    .select(
-      "id, ride_id, booking_id, requested_at, " +
+    const { data, error } = await supabase
+      .from("ride_consents")
+      .select(
+        "id, ride_id, booking_id, requested_at, " +
         "rides:ride_id(origin_label, destination_label, departure_time), " +
         "ride_bookings:booking_id(passenger_id, expires_at, users:passenger_id(display_name))"
-    )
-    .eq("rider_id", req.params.id)
-    .eq("status", "awaiting")
-    .order("requested_at", { ascending: true });
+      )
+      .eq("rider_id", req.params.id)
+      .eq("status", "awaiting")
+      .order("requested_at", { ascending: true });
 
-  if (error) return res.status(500).json({ error: "PENDING_CONSENTS_FETCH_FAILED", details: error.message });
+    if (error) return res.status(500).json({ error: "PENDING_CONSENTS_FETCH_FAILED", details: error.message });
 
-  return res.json({
-    pending: (data ?? []).map((row: any) => ({
-      ride_id: row.ride_id,
-      booking_id: row.booking_id,
-      requested_at: row.requested_at,
-      expires_at: row.ride_bookings?.expires_at ?? null,
-      origin_label: row.rides?.origin_label,
-      destination_label: row.rides?.destination_label,
-      departure_time: row.rides?.departure_time,
-      joining_rider_name: row.ride_bookings?.users?.display_name ?? "A rider",
-    })),
+    return res.json({
+      pending: (data ?? []).map((row: any) => ({
+        ride_id: row.ride_id,
+        booking_id: row.booking_id,
+        requested_at: row.requested_at,
+        expires_at: row.ride_bookings?.expires_at ?? null,
+        origin_label: row.rides?.origin_label,
+        destination_label: row.rides?.destination_label,
+        departure_time: row.rides?.departure_time,
+        joining_rider_name: row.ride_bookings?.users?.display_name ?? "A rider",
+      })),
+    });
   });
-});
 
 // ─────────────────────────────────────────────────────────────
 // Day 10: in-app notification feed. See
@@ -3462,14 +3458,14 @@ function serializeMatchRequest(r: MatchRequest, viewerAliases: string[]) {
   };
   const conditions = r.conditions
     ? {
-        agrees_to_preferences: r.conditions.agreesToPreferences,
-        pickup_spot: r.conditions.pickupSpot,
-        departure_time_note: r.conditions.departureTimeNote,
-        gender_preference: r.conditions.genderPreference,
-        max_co_passengers: r.conditions.maxCoPassengers,
-        fare_agreed: r.conditions.fareAgreed,
-        note: r.conditions.note,
-      }
+      agrees_to_preferences: r.conditions.agreesToPreferences,
+      pickup_spot: r.conditions.pickupSpot,
+      departure_time_note: r.conditions.departureTimeNote,
+      gender_preference: r.conditions.genderPreference,
+      max_co_passengers: r.conditions.maxCoPassengers,
+      fare_agreed: r.conditions.fareAgreed,
+      note: r.conditions.note,
+    }
     : null;
   const snapshot = {
     origin_label: r.snapshot.originLabel,
@@ -3496,10 +3492,10 @@ function serializeMatchRequest(r: MatchRequest, viewerAliases: string[]) {
     to_trip_request_id: r.toTripRequestId,
     group: r.group
       ? {
-          host_user_id: r.group.hostUserId,
-          host_trip_request_id: r.group.hostTripRequestId,
-          group_id: groupIdOf(r),
-        }
+        host_user_id: r.group.hostUserId,
+        host_trip_request_id: r.group.hostTripRequestId,
+        group_id: groupIdOf(r),
+      }
       : null,
     preferences,
     conditions,
@@ -3516,7 +3512,35 @@ function serializeMatchRequest(r: MatchRequest, viewerAliases: string[]) {
 async function assertChatAccess(chatId: string, userId: string): Promise<boolean> {
   if (userCanAccessChat(chatId, userId)) return true;
   const aliases = await resolveUserAliases(userId);
-  return grantChatAccessIfAlias(chatId, userId, aliases);
+  if (grantChatAccessIfAlias(chatId, userId, aliases)) return true;
+  try {
+    const { data: t } = await supabase
+      .from("match_chat_threads")
+      .select("id, participant_ids, participant_names, origin_label, destination_label, fare_share_pkr, ride_id, created_at")
+      .eq("id", chatId)
+      .maybeSingle();
+    if (t) {
+      const pIds = (t.participant_ids as string[]) || [];
+      const hasAccess = pIds.some((p: string) => aliases.includes(p) || p === userId);
+      if (hasAccess) {
+        syncThread({
+          id: t.id,
+          participantIds: pIds,
+          participantNames: (t.participant_names as Record<string, string>) || {},
+          originLabel: t.origin_label || "Pickup",
+          destinationLabel: t.destination_label || "Drop-off",
+          fareSharePkr: Number(t.fare_share_pkr) || 0,
+          rideId: t.ride_id,
+          createdAt: t.created_at,
+          messages: [],
+        });
+        return true;
+      }
+    }
+  } catch {
+    /* fallback to local store */
+  }
+  return false;
 }
 
 matchesRouter.post(
@@ -3539,25 +3563,41 @@ matchesRouter.post(
       return res.status(400).json({ error: "MISSING_REQUIRED_FIELDS" });
     }
 
-    // Two-sided approval gate: a thread may only exist once BOTH riders
-    // approved a match request (finalize stored a confirmed request).
-    // Without that, any authenticated user could open a chat with any
-    // other user by guessing an id.
     const authId = req.auth!.userId;
     const myAliases = await resolveUserAliases(authId);
     const peerAliases = await resolveUserAliases(String(peer_user_id));
-    if (!hasConfirmedRequestBetween(myAliases, peerAliases)) {
-      return res.status(403).json({
-        error: "APPROVAL_REQUIRED",
-        details:
-          "A chat opens only after you and this rider have both approved a ride request — " +
-          "send a request, wait for them to accept, then give the final OK.",
-      });
+    if (!hasOpenOrConfirmedRequestBetween(myAliases, peerAliases)) {
+      // Also check Supabase in case the request is in DB but not yet synced locally
+      try {
+        const { data: dbReq } = await supabase
+          .from("match_requests")
+          .select("id, status, from_user_id, to_user_id")
+          .in("status", ["pending", "awaiting_requester", "confirmed"])
+          .limit(1);
+        const hasDb = Boolean(
+          dbReq &&
+            dbReq.some(
+              (r) =>
+                (myAliases.includes(r.from_user_id) && peerAliases.includes(r.to_user_id)) ||
+                (peerAliases.includes(r.from_user_id) && myAliases.includes(r.to_user_id))
+            )
+        );
+        if (!hasDb) {
+          return res.status(403).json({
+            error: "APPROVAL_REQUIRED",
+            details:
+              "A chat opens when you offer or request a ride with this user. Send a request to start chatting.",
+          });
+        }
+      } catch {
+        return res.status(403).json({
+          error: "APPROVAL_REQUIRED",
+          details:
+            "A chat opens when you offer or request a ride with this user. Send a request to start chatting.",
+        });
+      }
     }
 
-    // Key the thread by canonical users.id (never the auth uid variant)
-    // so the approval flow's finalize-thread and this ride-id update are
-    // the same thread for a pair.
     const myCanonical = (await resolveCanonicalUserId(authId)) ?? authId;
     const peerCanonical = (await resolveCanonicalUserId(String(peer_user_id))) ?? String(peer_user_id);
     if (myCanonical === peerCanonical) {
@@ -3574,6 +3614,23 @@ matchesRouter.post(
       fareSharePkr: Number(fare_share_pkr) || 0,
       rideId: typeof ride_id === "string" ? ride_id : null,
     });
+
+    try {
+      await supabase.from("match_chat_threads").upsert({
+        id: thread.id,
+        participant_ids: [myCanonical, peerCanonical],
+        participant_names: {
+          [myCanonical]: typeof my_display_name === "string" ? my_display_name : "You",
+          [peerCanonical]: typeof peer_display_name === "string" ? peer_display_name : "Carpool mate",
+        },
+        origin_label: thread.originLabel,
+        destination_label: thread.destinationLabel,
+        fare_share_pkr: thread.fareSharePkr,
+        ride_id: thread.rideId,
+      });
+    } catch {
+      /* best effort */
+    }
 
     return res.status(201).json({
       chat_id: thread.id,
@@ -3612,6 +3669,32 @@ matchesRouter.get(
       authId,
       pathId,
     ]);
+
+    try {
+      const aliasArray = [...meIds];
+      const { data: dbThreads } = await supabase
+        .from("match_chat_threads")
+        .select("id, participant_ids, participant_names, origin_label, destination_label, fare_share_pkr, ride_id, created_at")
+        .overlaps("participant_ids", aliasArray);
+      if (dbThreads && dbThreads.length > 0) {
+        for (const t of dbThreads) {
+          syncThread({
+            id: t.id,
+            participantIds: (t.participant_ids as string[]) || [],
+            participantNames: (t.participant_names as Record<string, string>) || {},
+            originLabel: t.origin_label || "Pickup",
+            destinationLabel: t.destination_label || "Drop-off",
+            fareSharePkr: Number(t.fare_share_pkr) || 0,
+            rideId: t.ride_id,
+            createdAt: t.created_at,
+            messages: [],
+          });
+        }
+      }
+    } catch {
+      /* best-effort fallback */
+    }
+
     const seen = new Map<string, NonNullable<ReturnType<typeof getMatchChat>>>();
     for (const uid of meIds) {
       for (const t of listMatchChatsForUser(uid)) seen.set(t.id, t);
@@ -3669,6 +3752,28 @@ matchesRouter.get(
     if (!(await assertChatAccess(chatId, userId))) {
       return res.status(404).json({ error: "CHAT_NOT_FOUND" });
     }
+
+    // Sync from Supabase match_chat_messages
+    try {
+      const { data: dbMsgs } = await supabase
+        .from("match_chat_messages")
+        .select("id, sender_id, text, created_at")
+        .eq("thread_id", chatId)
+        .order("created_at", { ascending: true });
+      if (dbMsgs && dbMsgs.length > 0) {
+        for (const m of dbMsgs) {
+          syncMessage(chatId, {
+            id: m.id,
+            senderId: m.sender_id,
+            text: m.text,
+            createdAt: m.created_at,
+          });
+        }
+      }
+    } catch {
+      /* fallback */
+    }
+
     const thread = getMatchChat(chatId)!;
     const aliases = await resolveUserAliases(userId);
     return res.json({
@@ -3706,6 +3811,18 @@ matchesRouter.post(
         error: "CHAT_SEND_DENIED",
         details: "You're not a participant on this chat thread.",
       });
+    }
+
+    try {
+      await supabase.from("match_chat_messages").insert({
+        id: msg.id,
+        thread_id: chatId,
+        sender_id: user_id,
+        text: msg.text,
+        created_at: msg.createdAt,
+      });
+    } catch {
+      /* best effort */
     }
     return res.status(201).json({
       id: msg.id,
@@ -3873,6 +3990,65 @@ matchesRouter.post(
       snapshot,
       group,
     });
+
+    // Auto-create chat thread right away so parties can coordinate immediately
+    const chatThread = upsertMatchChat({
+      myUserId: canonicalFrom,
+      myDisplayName: created.fromName,
+      peerUserId: canonicalTo,
+      peerDisplayName: created.toName,
+      originLabel: snapshot.originLabel,
+      destinationLabel: snapshot.destinationLabel,
+      fareSharePkr: snapshot.fareShareFromPkr,
+      groupId: group ? groupIdOf(created) : null,
+    });
+    created.chatId = chatThread.id;
+    attachChatToRequest(created.id, chatThread.id);
+
+    const initialNote = preferences.note || preferences.pickupNote;
+    if (initialNote) {
+      const msg = addMatchChatMessage(chatThread.id, canonicalFrom, initialNote);
+      try {
+        if (msg) {
+          await supabase.from("match_chat_messages").insert({
+            id: msg.id,
+            thread_id: chatThread.id,
+            sender_id: canonicalFrom,
+            text: msg.text,
+            created_at: msg.createdAt,
+          });
+        }
+      } catch {
+        /* best-effort */
+      }
+    }
+
+    try {
+      await supabase.from("match_chat_threads").upsert({
+        id: chatThread.id,
+        participant_ids: [canonicalFrom, canonicalTo],
+        participant_names: { [canonicalFrom]: created.fromName, [canonicalTo]: created.toName },
+        origin_label: snapshot.originLabel,
+        destination_label: snapshot.destinationLabel,
+        fare_share_pkr: snapshot.fareShareFromPkr,
+      });
+      await supabase.from("match_requests").upsert({
+        id: created.id,
+        from_user_id: canonicalFrom,
+        from_name: created.fromName,
+        to_user_id: canonicalTo,
+        to_name: created.toName,
+        from_trip_request_id: created.fromTripRequestId,
+        to_trip_request_id: created.toTripRequestId,
+        status: created.status,
+        preferences: created.preferences,
+        snapshot: created.snapshot,
+        chat_id: chatThread.id,
+      });
+    } catch {
+      /* best-effort */
+    }
+
     return res.status(201).json({ request: serializeMatchRequest(created, viewerAliases) });
   }
 );
@@ -3902,6 +4078,39 @@ matchesRouter.get(
       ...(await resolveUserAliases(authId)),
       ...(await resolveUserAliases(pathId))
     );
+
+    // Sync from Supabase match_requests
+    try {
+      const { data: dbRequests } = await supabase
+        .from("match_requests")
+        .select("*")
+        .or(`from_user_id.in.(${viewerAliases.map((a) => `"${a}"`).join(",")}),to_user_id.in.(${viewerAliases.map((a) => `"${a}"`).join(",")})`);
+      if (dbRequests && dbRequests.length > 0) {
+        for (const r of dbRequests) {
+          syncMatchRequest({
+            id: r.id,
+            fromUserId: r.from_user_id,
+            fromName: r.from_name,
+            toUserId: r.to_user_id,
+            toName: r.to_name,
+            fromTripRequestId: r.from_trip_request_id,
+            toTripRequestId: r.to_trip_request_id,
+            status: r.status,
+            preferences: r.preferences || {},
+            conditions: r.conditions || null,
+            snapshot: r.snapshot || {},
+            chatId: r.chat_id || null,
+            createdAt: r.created_at,
+            updatedAt: r.updated_at,
+            respondedAt: r.responded_at,
+            confirmedAt: r.confirmed_at,
+            expiresAt: r.expires_at,
+          });
+        }
+      }
+    } catch {
+      /* fallback */
+    }
 
     expireStaleMatchRequests();
     const all = listRequestsForUser(viewerAliases);

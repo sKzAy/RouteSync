@@ -624,7 +624,16 @@ export default function App() {
 
   async function submitMatchRequest(values: SendRequestValues) {
     const match = matches.find((m) => m.id === requestMatchId);
-    if (!match || !match.candidateUserId || !searchCriteria || !currentUserId) return;
+    if (!match || !match.candidateUserId || !searchCriteria || !currentUserId || sendingRequest) return;
+
+    const existing = outgoingRequests.find(
+      (o) => o.peer_user_id === match.candidateUserId && (o.status === "pending" || o.status === "awaiting_requester")
+    );
+    if (existing) {
+      setRequestMatchId(null);
+      setDemoNotice(`You already have an active request with ${match.candidateDisplayName}.`);
+      return;
+    }
 
     const [hh, mm] = searchCriteria.departureTime.split(":").map(Number);
     const dep = new Date();
@@ -1083,6 +1092,7 @@ export default function App() {
             userId={currentUserId}
             onOutgoingChange={setOutgoingRequests}
             onConfirmed={handleRequestConfirmed}
+            onOpenChat={(info) => setActiveChatMatch(info)}
           />
         )}
 
@@ -1376,6 +1386,7 @@ export default function App() {
                     requestStatus={openRequestStatusFor(m.candidateUserId)}
                     onAccept={() => handleAccept(m.id)}
                     onReject={() => handleReject(m.id)}
+                    onOpenChat={() => openChatForMatch(m)}
                   />
                 ))}
 
