@@ -31,12 +31,20 @@ function sanitizeSupabaseUrl(rawUrl?: string): string {
   return url;
 }
 
-const rawSupabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+const rawSupabaseUrl =
+  process.env.SUPABASE_URL ||
+  process.env.VITE_SUPABASE_URL ||
+  process.env.NEXT_PUBLIC_SUPABASE_URL ||
+  "https://kmjbbudjhzxigqyhvzjg.supabase.co";
 const supabaseUrl = sanitizeSupabaseUrl(rawSupabaseUrl);
 const supabaseAnonKey =
   process.env.SUPABASE_ANON_KEY ||
   process.env.VITE_SUPABASE_ANON_KEY ||
-  process.env.SUPABASE_SERVICE_ROLE_KEY;
+  process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+  process.env.SUPABASE_PUBLISHABLE_KEY ||
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  "sb_publishable_YELvd6FBMYT1yEbynXi-FA_c9TMwJvp";
 
 // The auth-verifying client uses the anon key (not the service-role key) —
 // verifying a JWT doesn't need elevated privileges, and using the anon key
