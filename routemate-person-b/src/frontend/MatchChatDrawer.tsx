@@ -21,6 +21,7 @@ export interface ConfirmedMatchInfo {
   id: string;
   /** Server chat thread id — required for live messaging. */
   chatId?: string;
+  candidateUserId?: string;
   candidateDisplayName: string;
   candidatePhone: string;
   candidateSectorFrom: string;
@@ -58,18 +59,57 @@ export default function MatchChatDrawer({
   match,
   onClose,
   currentUserId,
-  candidateUserId,
+  candidateUserId: propCandidateUserId,
   candidateIsVerified = false,
   candidateVerifiedDomain = null,
   safety,
 }: MatchChatDrawerProps) {
+  const candidateUserId = match.candidateUserId || propCandidateUserId;
   const [safetyOpen, setSafetyOpen] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [loadError, setLoadError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  const [chatId, setChatId] = useState<string | undefined>(match.chatId);
   const bottomRef = useRef<HTMLDivElement | null>(null);
-  const chatId = match.chatId;
+
+  useEffect(() => {
+    if (match.chatId) setChatId(match.chatId);
+  }, [match.chatId]);
+
+  // If chatId is missing but both user IDs are known, initialize or retrieve the thread
+  useEffect(() => {
+    if (chatId || !currentUserId || !candidateUserId) return;
+    let cancelled = false;
+    async function initChat() {
+      try {
+        const res = await authedFetch(`${API_URL}/api/match-chats`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            my_user_id: currentUserId,
+            peer_user_id: candidateUserId,
+            peer_display_name: match.candidateDisplayName,
+            origin_label: match.candidateSectorFrom || "Pickup",
+            destination_label: match.candidateSectorTo || "Drop-off",
+            fare_share_pkr: match.fareSharePKR ?? 0,
+          }),
+        });
+        if (!cancelled && res.ok) {
+          const payload = await res.json();
+          if (payload.chat_id) {
+            setChatId(payload.chat_id);
+          }
+        }
+      } catch {
+        /* best-effort */
+      }
+    }
+    initChat();
+    return () => {
+      cancelled = true;
+    };
+  }, [chatId, currentUserId, candidateUserId, match]);
 
   async function refreshMessages(opts?: { quiet?: boolean }) {
     if (!chatId || !currentUserId) return;
@@ -126,7 +166,39 @@ export default function MatchChatDrawer({
 
   async function handleSend(textToSend?: string) {
     const text = (textToSend || input).trim();
-    if (!text || !chatId || !currentUserId || sending) return;
+    if (!text || !currentUserId || sending) return;
+
+    let targetChatId = chatId;
+    if (!targetChatId && currentUserId && candidateUserId) {
+      try {
+        const res = await authedFetch(`${API_URL}/api/match-chats`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            my_user_id: currentUserId,
+            peer_user_id: candidateUserId,
+            peer_display_name: match.candidateDisplayName,
+            origin_label: match.candidateSectorFrom || "Pickup",
+            destination_label: match.candidateSectorTo || "Drop-off",
+            fare_share_pkr: match.fareSharePKR ?? 0,
+          }),
+        });
+        if (res.ok) {
+          const payload = await res.json();
+          if (payload.chat_id) {
+            targetChatId = payload.chat_id;
+            setChatId(payload.chat_id);
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+
+    if (!targetChatId) {
+      setLoadError("Connecting to chat… please retry in a second.");
+      return;
+    }
 
     setSending(true);
     if (!textToSend) setInput("");
@@ -146,7 +218,7 @@ export default function MatchChatDrawer({
 
     try {
       const res = await authedFetch(
-        `${API_URL}/api/match-chats/${encodeURIComponent(chatId)}/messages`,
+        `${API_URL}/api/match-chats/${encodeURIComponent(targetChatId)}/messages`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -387,8 +459,8 @@ export default function MatchChatDrawer({
           }}
         >
           {!chatId && (
-            <div style={{ fontSize: "13px", color: "var(--rm-danger)" }}>
-              Chat thread missing — accept the match again while the API is running.
+            <div style={{ fontSize: "12px", color: "var(--rm-ink-soft)", display: "flex", alignItems: "center", gap: "8px", padding: "4px 0" }}>
+              <span>💬 Connecting live chat with {match.candidateDisplayName.split(" ")[0]}…</span>
             </div>
           )}
           {loadError && (
@@ -448,7 +520,7 @@ export default function MatchChatDrawer({
               key={idx}
               type="button"
               onClick={() => handleSend(chip)}
-              disabled={!chatId || sending}
+              disabled={(!chatId && !candidateUserId) || sending}
               style={{
                 fontSize: "11px",
                 whiteSpace: "nowrap",
@@ -457,7 +529,7 @@ export default function MatchChatDrawer({
                 border: "1px solid var(--rm-border)",
                 borderRadius: "999px",
                 color: "var(--rm-ink-soft)",
-                cursor: !chatId || sending ? "wait" : "pointer",
+                cursor: (!chatId && !candidateUserId) || sending ? "wait" : "pointer",
               }}
             >
               {chip}
@@ -481,8 +553,8 @@ export default function MatchChatDrawer({
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Type a message to your carpool mate…"
-            disabled={!chatId || sending}
+            placeholder={(!chatId && !candidateUserId) ? "Connecting live chat…" : "Type a message to your carpool mate…"}
+            disabled={(!chatId && !candidateUserId) || sending}
             style={{
               flex: 1,
               padding: "10px 14px",
@@ -495,7 +567,7 @@ export default function MatchChatDrawer({
           />
           <button
             type="submit"
-            disabled={!chatId || sending}
+            disabled={(!chatId && !candidateUserId) || sending}
             style={{
               padding: "10px 16px",
               fontFamily: "var(--rm-font-display)",
@@ -505,8 +577,8 @@ export default function MatchChatDrawer({
               background: "var(--rm-signal)",
               border: "none",
               borderRadius: "var(--rm-radius)",
-              cursor: !chatId || sending ? "wait" : "pointer",
-              opacity: !chatId || sending ? 0.7 : 1,
+              cursor: (!chatId && !candidateUserId) || sending ? "wait" : "pointer",
+              opacity: (!chatId && !candidateUserId) || sending ? 0.7 : 1,
             }}
           >
             Send

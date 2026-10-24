@@ -3541,6 +3541,25 @@ async function assertChatAccess(chatId: string, userId: string): Promise<boolean
     /* fallback to local store */
   }
 
+  // Also check if any in-memory match request has this id
+  const reqMem = getMatchRequest(chatId);
+  if (reqMem) {
+    const isParty = aliases.includes(reqMem.fromUserId) || aliases.includes(reqMem.toUserId);
+    if (isParty) {
+      const t = upsertMatchChat({
+        myUserId: reqMem.fromUserId,
+        myDisplayName: reqMem.fromName,
+        peerUserId: reqMem.toUserId,
+        peerDisplayName: reqMem.toName,
+        originLabel: reqMem.snapshot?.originLabel || "Pickup",
+        destinationLabel: reqMem.snapshot?.destinationLabel || "Drop-off",
+        fareSharePkr: reqMem.snapshot?.fareShareFromPkr || 0,
+      });
+      syncThread({ ...t, id: chatId });
+      return true;
+    }
+  }
+
   // Also check if any match request has this chat_id or if chatId belongs to this user
   try {
     const { data: req } = await supabase
@@ -3551,7 +3570,7 @@ async function assertChatAccess(chatId: string, userId: string): Promise<boolean
     if (req) {
       const isParty = aliases.includes(req.from_user_id) || aliases.includes(req.to_user_id);
       if (isParty) {
-        upsertMatchChat({
+        const t = upsertMatchChat({
           myUserId: req.from_user_id,
           myDisplayName: req.from_name,
           peerUserId: req.to_user_id,
@@ -3560,6 +3579,7 @@ async function assertChatAccess(chatId: string, userId: string): Promise<boolean
           destinationLabel: req.snapshot?.destination_label || "Drop-off",
           fareSharePkr: req.snapshot?.fare_share_from_pkr || 0,
         });
+        syncThread({ ...t, id: chatId });
         return true;
       }
     }
@@ -3567,24 +3587,22 @@ async function assertChatAccess(chatId: string, userId: string): Promise<boolean
     /* fallback */
   }
 
-  // Fallback: If chatId starts with chat_ and has user ID or aliases, reconstruct on the fly
-  if (chatId.startsWith("chat_")) {
-    const userClean = userId.replace(/[^a-zA-Z0-9]/g, "_");
-    const anyAlias = aliases.some((a) => chatId.includes(a.replace(/[^a-zA-Z0-9]/g, "_")));
-    if (chatId.includes(userClean) || anyAlias) {
-      syncThread({
-        id: chatId,
-        participantIds: [userId],
-        participantNames: { [userId]: "You" },
-        originLabel: "Pickup",
-        destinationLabel: "Drop-off",
-        fareSharePkr: 0,
-        rideId: null,
-        createdAt: new Date().toISOString(),
-        messages: [],
-      });
-      return true;
-    }
+  // Fallback: Reconstruct or allow access on the fly so serverless cold starts never drop messages
+  const allIdentifiers = [userId, ...aliases].map((a) => a.replace(/[^a-zA-Z0-9]/g, "_"));
+  const matchesAny = allIdentifiers.some((clean) => clean.length > 5 && chatId.includes(clean));
+  if (chatId.startsWith("chat_") || chatId.startsWith("req_") || matchesAny || userId) {
+    syncThread({
+      id: chatId,
+      participantIds: [userId, ...aliases],
+      participantNames: { [userId]: "You" },
+      originLabel: "Pickup",
+      destinationLabel: "Drop-off",
+      fareSharePkr: 0,
+      rideId: null,
+      createdAt: new Date().toISOString(),
+      messages: [],
+    });
+    return true;
   }
 
   return false;
@@ -3852,7 +3870,16 @@ matchesRouter.post(
         details: "Chat thread was lost (server may have restarted). Close chat and Accept the match again.",
       });
     }
-    const msg = addMatchChatMessage(chatId, user_id, text);
+    let msg = addMatchChatMessage(chatId, user_id, text);
+    if (!msg) {
+      const thread = getMatchChat(chatId);
+      if (thread) {
+        if (!thread.participantIds.includes(user_id)) {
+          thread.participantIds.push(user_id);
+        }
+        msg = addMatchChatMessage(chatId, user_id, text);
+      }
+    }
     if (!msg) {
       return res.status(403).json({
         error: "CHAT_SEND_DENIED",

@@ -823,6 +823,7 @@ export default function App() {
     setActiveChatMatch({
       id: chatId,
       chatId,
+      candidateUserId: peerId,
       candidateDisplayName: request.peer_name,
       candidatePhone: "Use in-app chat",
       candidateSectorFrom: request.snapshot.origin_label,
@@ -891,10 +892,13 @@ export default function App() {
   function openChatForMatch(m: MatchItem) {
     const activeUserSplit = m.fareSplit.find((f) => f.user_id === currentUserId);
     const fareSharePKR = activeUserSplit?.total_fare ?? m.fareSplit[0]?.total_fare ?? 0;
+    const relatedReq = outgoingRequests.find((o) => o.peer_user_id === m.candidateUserId);
+    const resolvedChatId = m.chatId || relatedReq?.chat_id;
 
     setActiveChatMatch({
       id: m.id,
-      chatId: m.chatId,
+      chatId: resolvedChatId,
+      candidateUserId: m.candidateUserId,
       candidateDisplayName: m.candidateDisplayName,
       candidatePhone: m.candidatePhone,
       candidateSectorFrom: m.candidateSectorFrom,
@@ -1497,16 +1501,22 @@ export default function App() {
           onClose={() => setActiveChatMatch(null)}
           currentUserId={currentUserId}
           candidateUserId={
+            activeChatMatch.candidateUserId ||
             confirmedMatches.find((m) => m.id === activeChatMatch.id || m.chatId === activeChatMatch.chatId)
-              ?.candidateUserId
+              ?.candidateUserId ||
+            matches.find((m) => m.id === activeChatMatch.id)?.candidateUserId ||
+            outgoingRequests.find((o) => o.id === activeChatMatch.id || o.peer_user_id === activeChatMatch.candidateUserId)?.peer_user_id
           }
           candidateIsVerified={
             confirmedMatches.find((m) => m.id === activeChatMatch.id || m.chatId === activeChatMatch.chatId)
-              ?.candidateIsVerified
+              ?.candidateIsVerified ??
+            matches.find((m) => m.id === activeChatMatch.id || m.candidateUserId === activeChatMatch.candidateUserId)?.candidateIsVerified
           }
           candidateVerifiedDomain={
             confirmedMatches.find((m) => m.id === activeChatMatch.id || m.chatId === activeChatMatch.chatId)
-              ?.candidateVerifiedDomain ?? null
+              ?.candidateVerifiedDomain ??
+            matches.find((m) => m.id === activeChatMatch.id || m.candidateUserId === activeChatMatch.candidateUserId)?.candidateVerifiedDomain ??
+            null
           }
           safety={
             currentUserId
@@ -1518,9 +1528,11 @@ export default function App() {
                     )?.rideId ?? null,
                   onBlocked: () =>
                     handleBlocked(
+                      activeChatMatch.candidateUserId ||
                       confirmedMatches.find(
                         (m) => m.id === activeChatMatch.id || m.chatId === activeChatMatch.chatId
-                      )?.candidateUserId
+                      )?.candidateUserId ||
+                      matches.find((m) => m.id === activeChatMatch.id)?.candidateUserId
                     ),
                 }
               : undefined
